@@ -1,0 +1,1003 @@
+catalog_version: 0.1-discovery
+generated: '2026-08-14'
+source_workbook: MMG_v19_Test_Cases_Grouped_by_Feature_v2.0.xlsx
+note: Draft seed produced by Phase-1 discovery. tc lists verified against the workbook; scenario/step specs are
+  proposals pending approval. Tests may belong to multiple workflows.
+workflows:
+- workflow_id: WF-O2C-GALLERY
+  workflow_name: Gallery Direct Sale — Order to Cash
+  business_domain: Sales → Inventory → Tax (Avalara) → Accounting → Documents
+  description: A gallery salesperson sells an art piece; the flow runs quotation → dollar discount → pickup/delivery
+    → Avatax preview → confirm (auto-invoice) → deliver (Legal Sale Date) → invoice (Legal Invoice Date) → post
+    (Avalara commit, per-jurisdiction tax lines) → payment (default journal) → reconcile → certificate of authenticity.
+  business_goal: Complete an in-gallery/phone sale from quotation to reconciled payment with jurisdiction-correct
+    tax, compliance dates and gallery documents.
+  actors:
+  - Gallery Salesperson
+  - Inventory Manager
+  - Accountant
+  - Gallery Manager
+  starting_state: Customer exists or is created; art item in stock (typically qty 1, unique piece)
+  ending_state: sale.order=sale, fully delivered & invoiced; picking=done; invoice posted with per-jurisdiction
+    tax; payment reconciled; Avalara committed; legal dates stamped; certificate available
+  preconditions:
+  - Avatax fiscal position configured (TC-DAT-017)
+  - auto-invoice setting per company known (TC-SAL-016)
+  - default payment journal configured (TC-INV-007/009)
+  required_master_data:
+  - customer with complete ship-to address
+  - art product with catalogue fields, price, tax category
+  - warehouse with stock
+  steps:
+  - create_or_select_customer
+  - create_quotation
+  - add_art_item_line
+  - 'apply_dollar_discount  # x_discount, TC-SAL-006/007'
+  - 'set_delivery_or_pickup  # TC-SAL-001/002'
+  - 'preview_avatax  # TC-TAX-008'
+  - 'confirm_order  # auto-invoice TC-SAL-013..016'
+  - 'validate_delivery  # Legal Sale Date TC-LEG-005'
+  - 'verify_invoice  # carry-over TC-TAX-010, Legal Invoice Date TC-LEG-006'
+  - 'post_invoice  # Avalara commit TC-TAX-011, jurisdiction lines TC-TAX-002/003'
+  - 'register_payment  # TC-INV-006/008'
+  - 'print_certificate  # TC-LBL-007'
+  state_transitions:
+  - 'sale.order: draft → sale → done'
+  - 'stock.picking: confirmed/assigned → done'
+  - 'account.move: draft → posted'
+  - 'payment_state: not_paid → in_payment/paid'
+  business_rules:
+  - dollar discount converts to % on onchange AND write
+  - posting blocked when Odoo tax ≠ Avalara summary (TC-TAX-004)
+  - legal dates stamped by automated actions 663/664
+  - certificate cites most recent CONFIRMED sale only
+  expected_business_outcomes:
+  - GL receivable cleared; tax payable per jurisdiction account
+  - stock on-hand decremented once
+  - Avalara transaction committed (voided on cancel)
+  scenarios:
+  - happy_path (from TC-SAL-017 — steps must be authored)
+  - discount_dollar_conversion
+  - pickup_at_store
+  - deposit_applied (links WF-DEPOSIT)
+  - tax_exempt_customer
+  - posting_guard_blocks
+  - cancel_after_confirm
+  - credit_note_refund
+  - auto_invoice_disabled
+  - multi_order_confirm (known-bug candidate TC-SAL-014)
+  - avalara_outage_graceful
+  - partial_delivery (NEW — gap G4)
+  missing_scenarios:
+  - partial delivery/invoice
+  - payment failure/decline
+  - concurrent confirm double-click
+  - role-boundary walk-through
+  - multi-currency (confirm scope)
+  open_questions:
+  - 'TC-LEG-007: is rewriting a posted invoice''s legal date intended?'
+  - 'TC-NEW-004: deposits vs native down payments'
+  - 'TC-NEW-001: keep/retire mmg_sale_delivery_status'
+  coverage_status: 72% scenario-slot coverage; E2E anchor TC-SAL-017 unspecified
+  automation_status: not automated; Wave 1 tax core + Wave 2 sales core in workbook
+  priority: P0 — MVP
+  risk: 'Highest: revenue + tax compliance + 7 subsystems crossing 4 version hops'
+  related_existing_tests:
+    count: 53
+    p0: 23
+    tc_ids:
+    - TC-SAL-001
+    - TC-SAL-002
+    - TC-SAL-003
+    - TC-SAL-004
+    - TC-SAL-005
+    - TC-SAL-006
+    - TC-SAL-007
+    - TC-SAL-008
+    - TC-SAL-009
+    - TC-SAL-010
+    - TC-SAL-011
+    - TC-SAL-012
+    - TC-SAL-013
+    - TC-SAL-014
+    - TC-SAL-015
+    - TC-SAL-016
+    - TC-SAL-017
+    - TC-SAL-018
+    - TC-SAL-019
+    - TC-SAL-020
+    - TC-SAL-021
+    - TC-SAL-022
+    - TC-SAL-023
+    - TC-STU-004
+    - TC-TAX-001
+    - TC-TAX-002
+    - TC-TAX-003
+    - TC-TAX-004
+    - TC-TAX-005
+    - TC-TAX-006
+    - TC-TAX-007
+    - TC-TAX-008
+    - TC-TAX-009
+    - TC-TAX-010
+    - TC-TAX-011
+    - TC-TAX-012
+    - TC-TAX-013
+    - TC-TAX-014
+    - TC-TAX-015
+    - TC-TAX-016
+    - TC-TAX-017
+    - TC-INV-001
+    - TC-INV-002
+    - TC-INV-003
+    - TC-INV-004
+    - TC-INV-006
+    - TC-INV-008
+    - TC-LEG-005
+    - TC-LEG-006
+    - TC-LEG-007
+    - TC-LBL-007
+    - TC-DAT-009
+    - TC-DAT-010
+  related_features:
+  - '1'
+  - '10'
+  - '105'
+  - '107'
+  - '12'
+  - '2'
+  - '21'
+  - '22'
+  - '23'
+  - '28'
+  - '29'
+  - '3'
+  - '31'
+  - '34'
+  - '35'
+  - '4'
+  - '8'
+  - EE / OOTB
+  - —
+  related_user_stories: resolved via tc → feature → User Story Coverage sheet (see normalized DB import)
+- workflow_id: WF-O2C-SHOPIFY
+  workflow_name: Shopify Order Import to Cash & Sync-Back
+  business_domain: Shopify → Queue Jobs → Orders → Payments/Deposits → Fulfillment → Inventory → Shopify
+  description: A paid Shopify order imports automatically, process rules confirm/invoice/pay by channel status,
+    fulfillment posts back with tracking, inventory decrements and listing publish-state updates.
+  business_goal: Storefront orders reach cash and the storefront reflects truth (status, tracking, stock) without
+    manual work.
+  actors:
+  - E-commerce Manager
+  - Operations Manager
+  - Warehouse Operator
+  - Accountant
+  - Integration Admin
+  starting_state: Connected Shopify store (or replay fixtures); listed product with stock; process rules and gateway
+    mappings configured
+  ending_state: SO in sale with channel refs; invoice posted & paid via mapped journal/deposit; picking done; fulfillment
+    posted w/ tracking; channel qty updated; queue jobs done; omni_log clean
+  preconditions:
+  - process rules migrated intact (TC-DAT-018)
+  - payment gateway → journal/method/deposit mapping (TC-ORD-005)
+  - safe mode OFF only for mock/sandbox targets
+  required_master_data:
+  - channel record with warehouse mapping (TC-SHP-027)
+  - listed products with SKU mapping
+  - default/guest customer policy (TC-ORD-014)
+  steps:
+  - place_or_inject_channel_order
+  - 'import_orders  # TC-SHP-026/TC-ORD-001'
+  - 'resolve_customer  # TC-ORD-014, TC-CHN-007/008'
+  - 'apply_order_defaults  # TC-ORD-015/016'
+  - 'run_process_rules  # TC-ORD-002/003/004'
+  - 'map_payment_and_deposit  # TC-ORD-005, TC-DEP-019'
+  - 'fulfill_picking  # TC-SHP-029/030'
+  - 'export_fulfillment  # TC-FUL-013/014/015'
+  - 'sync_inventory_back  # TC-SHP-009..012, TC-SHP-007/008'
+  - 'verify_status_roundtrip  # TC-ORD-017/018'
+  state_transitions:
+  - 'queue.job: pending → done (TEST_QUEUE_JOB_NO_DELAY in CI)'
+  - 'sale.order: imported draft → sale (per rule)'
+  - 'account.move: draft → posted → paid (per rule)'
+  - 'listing: published ↔ unpublished by stock'
+  business_rules:
+  - first matching process rule wins (TC-ORD-003)
+  - only paid orders auto-progress where configured
+  - fulfillment change-detection prevents re-sends (TC-FUL-014)
+  expected_business_outcomes:
+  - channel total == SO total == invoice total
+  - exactly one SO per channel order (idempotency — NEW)
+  - stock decremented once; publish state matches stock
+  scenarios:
+  - happy_path (TC-SHP-034)
+  - rule_matrix_confirm_only
+  - rule_matrix_confirm_invoice
+  - rule_matrix_full_auto
+  - guest_customer
+  - cancel_with_credit_note
+  - cancel_without_credit_note
+  - return_via_wizard
+  - missing_product_import
+  - duplicate_import_idempotency (NEW — gap G3)
+  missing_scenarios:
+  - duplicate import (idempotency)
+  - partial fulfillment multi-line
+  - refund → Avalara void chain
+  - oversell race (concurrency)
+  - failed-import recovery chained E2E
+  open_questions:
+  - Shopify API version pinning strategy on v19 connector (TC-SHP-033)
+  coverage_status: 78%; the one real E2E exists (TC-SHP-034) but assertion depth is thin
+  automation_status: not automated; 13 SHP + 5 ORD + 6 FUL Wave-1 tests in workbook
+  priority: P0 — MVP
+  risk: 'Highest operational: order intake rides OWL2-rewrite + OCA-rebase surfaces'
+  related_existing_tests:
+    count: 46
+    p0: 16
+    tc_ids:
+    - TC-SHP-034
+    - TC-SHP-025
+    - TC-SHP-026
+    - TC-SHP-027
+    - TC-SHP-028
+    - TC-SHP-029
+    - TC-SHP-030
+    - TC-SHP-007
+    - TC-SHP-008
+    - TC-SHP-009
+    - TC-SHP-010
+    - TC-SHP-011
+    - TC-ORD-001
+    - TC-ORD-002
+    - TC-ORD-003
+    - TC-ORD-004
+    - TC-ORD-005
+    - TC-ORD-006
+    - TC-ORD-007
+    - TC-ORD-008
+    - TC-ORD-009
+    - TC-ORD-010
+    - TC-ORD-011
+    - TC-ORD-012
+    - TC-ORD-013
+    - TC-ORD-014
+    - TC-ORD-015
+    - TC-ORD-016
+    - TC-ORD-017
+    - TC-ORD-018
+    - TC-ORD-019
+    - TC-ORD-020
+    - TC-ORD-021
+    - TC-ORD-022
+    - TC-FUL-013
+    - TC-FUL-014
+    - TC-FUL-015
+    - TC-FUL-016
+    - TC-FUL-017
+    - TC-FUL-018
+    - TC-DEP-019
+    - TC-CHN-007
+    - TC-CHN-008
+    - TC-CHN-009
+    - TC-DAT-018
+    - TC-JOB-001
+  related_features:
+  - '15'
+  - '18'
+  - '48'
+  - '49'
+  - '50'
+  - '55'
+  - '56'
+  - '57'
+  - '58'
+  - '59'
+  - '60'
+  - '61'
+  - '74'
+  - '75'
+  - '87'
+  - '88'
+  - '92'
+  - —
+  related_user_stories: resolved via tc → feature → User Story Coverage sheet (see normalized DB import)
+- workflow_id: WF-DEPOSIT
+  workflow_name: Customer/Vendor Deposit Lifecycle
+  business_domain: Sales/Purchase → Payments → Accounting (liability)
+  description: Take a deposit (fixed/% of order, manual or channel-mapped), track liability, apply to the invoice,
+    bill balance, reconcile GL; includes cancel/reset paths.
+  business_goal: Money held on account for high-value art is never lost, double-applied, or stuck.
+  actors:
+  - Gallery Salesperson
+  - Accountant
+  - Accounting Manager
+  starting_state: Deposit accounts/journals configured per company & partner (TC-DEP-002/003/015)
+  ending_state: Deposit applied; balance billed; liability relieved; GL reconciles (TC-DEP-014)
+  preconditions:
+  - deposit account properties on partner (TC-DAT-019)
+  required_master_data:
+  - customer
+  - sales order for %-based deposits
+  - deposit journal
+  steps:
+  - 'record_deposit  # TC-DEP-001 (or from SO: TC-DEP-004/005; or channel: TC-DEP-019)'
+  - 'verify_outstanding_on_contact  # TC-DEP-009'
+  - create_invoice_from_order
+  - 'apply_deposit_to_invoice  # TC-DEP-007'
+  - bill_balance
+  - 'verify_gl_liability_relieved  # TC-DEP-014'
+  state_transitions:
+  - 'account.payment (deposit): draft → posted → reconciled'
+  - 'liability account: credited → relieved on application'
+  business_rules:
+  - deposit > invoice leaves residual on account (TC-DEP-017)
+  - multiple deposits accumulate (TC-DEP-016)
+  - reset-to-draft reverses cleanly (TC-DEP-010/011)
+  expected_business_outcomes:
+  - customer billed exactly the balance
+  - Is-a-Deposit flag preserved on history (TC-DEP-020)
+  scenarios:
+  - record_manual_deposit
+  - from_so_fixed
+  - from_so_percent
+  - apply_and_bill_balance
+  - multiple_deposits
+  - deposit_exceeds_invoice
+  - cancel_deposit
+  - reset_to_draft
+  missing_scenarios:
+  - refund deposit to customer
+  - vendor-side full E2E (PO → bill → apply)
+  - cancel permissions
+  - multi-currency beyond TC-DEP-012
+  open_questions:
+  - 'TC-NEW-004 🔻: migrate to native v19 down payments or keep custom modules?'
+  coverage_status: 79% — most complete money workflow
+  automation_status: not automated; 8 Wave-1 tests; zero external APIs → first to stabilize
+  priority: P0 — MVP
+  risk: 'High: liability accounting + pending convergence decision'
+  related_existing_tests:
+    count: 22
+    p0: 10
+    tc_ids:
+    - TC-DEP-001
+    - TC-DEP-002
+    - TC-DEP-003
+    - TC-DEP-004
+    - TC-DEP-005
+    - TC-DEP-006
+    - TC-DEP-007
+    - TC-DEP-008
+    - TC-DEP-009
+    - TC-DEP-010
+    - TC-DEP-011
+    - TC-DEP-012
+    - TC-DEP-013
+    - TC-DEP-014
+    - TC-DEP-015
+    - TC-DEP-016
+    - TC-DEP-017
+    - TC-DEP-018
+    - TC-DEP-019
+    - TC-DEP-020
+    - TC-DAT-016
+    - TC-DAT-019
+  related_features:
+  - '101'
+  - '102'
+  - '30'
+  - '44'
+  - '45'
+  - '46'
+  - '57'
+  related_user_stories: resolved via tc → feature → User Story Coverage sheet (see normalized DB import)
+- workflow_id: WF-INVSYNC
+  workflow_name: Stock Change → Channel Quantity
+  business_domain: Inventory → Queue Jobs → Channel (Shopify)
+  description: Any stock change reaches the storefront correctly shaped (sync %, min/max caps, exclusions) via delta
+    or bulk sync; listing publish-state follows stock.
+  business_goal: Never oversell one-of-a-kind art; never show stale stock.
+  actors:
+  - Inventory Manager
+  - E-commerce Manager
+  - Integration Admin
+  starting_state: 'Channel sync configured: warehouse, percentage, caps, exclusions (TC-FUL-001..007)'
+  ending_state: Channel quantity == shaped Odoo quantity; last-sync timestamp advanced; jobs done
+  preconditions:
+  - listing exists and is mapped
+  - sync toggles known (TC-SHP-012)
+  required_master_data:
+  - products with listings
+  - channel warehouse mapping
+  steps:
+  - configure_sync_shaping
+  - 'move_stock  # sale/receipt/adjustment'
+  - 'run_delta_sync  # TC-FUL-008 (only changed products push)'
+  - verify_pushed_quantities
+  - 'run_bulk_sync_with_lock  # TC-FUL-009/010/011'
+  - 'verify_listing_publish_state  # TC-SHP-007/008'
+  state_transitions:
+  - 'listing: published ↔ unpublished at zero stock'
+  - 'queue.job per push: pending → done'
+  business_rules:
+  - shaped qty = min(max(qty×%, min_cap), max_cap) with exclusions
+  - in-progress marker blocks duplicate bulk sync (TC-FUL-010)
+  expected_business_outcomes:
+  - only changed products pushed on delta; timestamp advances
+  scenarios:
+  - delta_sync_three_products
+  - caps_and_percentage
+  - exclusion_product
+  - exclusion_variant
+  - exclusion_category
+  - bulk_sync_locking
+  - publish_state_zero_stock
+  missing_scenarios:
+  - zero/negative boundary
+  - multi-warehouse aggregation
+  - concurrent sync vs order race
+  - FTPS delivery in CI (mock)
+  open_questions: []
+  coverage_status: 74%
+  automation_status: not automated; 6 Wave-1 tests; replay-mode assertable on computed payload
+  priority: P0 — MVP
+  risk: 'High: silent oversell of unique inventory'
+  related_existing_tests:
+    count: 19
+    p0: 7
+    tc_ids:
+    - TC-FUL-001
+    - TC-FUL-002
+    - TC-FUL-003
+    - TC-FUL-004
+    - TC-FUL-005
+    - TC-FUL-006
+    - TC-FUL-007
+    - TC-FUL-008
+    - TC-FUL-009
+    - TC-FUL-010
+    - TC-FUL-011
+    - TC-FUL-012
+    - TC-SHP-012
+    - TC-SHP-013
+    - TC-SHP-018
+    - TC-PIM-012
+    - TC-PIM-013
+    - TC-PIM-015
+    - TC-CHN-010
+  related_features:
+  - '15'
+  - '19'
+  - '47'
+  - '67'
+  - '89'
+  related_user_stories: resolved via tc → feature → User Story Coverage sheet (see normalized DB import)
+- workflow_id: WF-PIM-PUBLISH
+  workflow_name: Art Item → Channel Listing → Storefront
+  business_domain: Catalogue → PIM → Shopify
+  description: Create/prepare an art item, map to a channel listing, set price, export with metafields/images/collections,
+    publish.
+  business_goal: New art reaches the storefront complete and correct.
+  actors:
+  - Art Cataloguer
+  - E-commerce Manager
+  - Product Manager
+  starting_state: Art item with full catalogue record (TC-ART-001)
+  ending_state: Listing live on channel with correct attributes, price, images, publish state
+  preconditions:
+  - channel connected; export field-control configured (TC-PIM-003)
+  required_master_data:
+  - art item with ~35 fields
+  - categories incl. website extra categories
+  - pricelist per channel (TC-PIM-021)
+  steps:
+  - create_art_item
+  - 'assign_categories  # TC-BLK-008/009, TC-ART-007'
+  - 'attach_images  # TC-PIM-016/TC-SHP-019'
+  - 'create_or_map_listing  # TC-PIM-001/005/006'
+  - 'set_channel_price  # TC-PIM-021'
+  - 'export_to_channel  # TC-PIM-002/003/004'
+  - 'export_metafields  # TC-SHP-004/005/006'
+  - 'publish_and_verify  # TC-PIM-012'
+  state_transitions:
+  - 'listing: draft → exported → published'
+  business_rules:
+  - exported-field control honoured; metafield compare avoids redundant writes
+  - SKU uniqueness enforced (TC-SHP-021)
+  expected_business_outcomes:
+  - storefront shows art attributes as metafields; inventory rules shape qty
+  scenarios:
+  - publish_new_item_e2e (NEW anchor — must be authored)
+  - import_and_map_existing
+  - metafield_update_and_clear
+  - bulk_collections_tags
+  missing_scenarios:
+  - E2E anchor test
+  - unlist/delete listing flow
+  - variant matrix listing
+  open_questions: []
+  coverage_status: 75% atomically; no E2E anchor
+  automation_status: not automated; Wave 2
+  priority: P1 — second wave
+  risk: 'Medium-high: metafields are MMG-specific value'
+  related_existing_tests:
+    count: 33
+    p0: 7
+    tc_ids:
+    - TC-ART-001
+    - TC-ART-003
+    - TC-ART-007
+    - TC-ART-013
+    - TC-BLK-008
+    - TC-BLK-009
+    - TC-PIM-001
+    - TC-PIM-002
+    - TC-PIM-003
+    - TC-PIM-004
+    - TC-PIM-005
+    - TC-PIM-006
+    - TC-PIM-007
+    - TC-PIM-008
+    - TC-PIM-009
+    - TC-PIM-010
+    - TC-PIM-011
+    - TC-PIM-014
+    - TC-PIM-016
+    - TC-PIM-019
+    - TC-PIM-021
+    - TC-SHP-003
+    - TC-SHP-004
+    - TC-SHP-005
+    - TC-SHP-006
+    - TC-SHP-014
+    - TC-SHP-015
+    - TC-SHP-016
+    - TC-SHP-017
+    - TC-SHP-019
+    - TC-SHP-021
+    - TC-SHP-022
+    - TC-SHP-024
+  related_features:
+  - '13'
+  - '14'
+  - '16'
+  - '17'
+  - '36'
+  - '39'
+  - '40'
+  - '5'
+  - '6'
+  - '63'
+  - '64'
+  - '65'
+  - '66'
+  - '68'
+  - '72'
+  - '73'
+  related_user_stories: resolved via tc → feature → User Story Coverage sheet (see normalized DB import)
+- workflow_id: WF-CATALOG
+  workflow_name: Art Catalogue Master-Data Maintenance
+  business_domain: Inventory / Product master data (69,201 templates)
+  description: Create, import, enrich, sync (template↔variant), constrain (barcode), reference-data-manage, archive
+    art items.
+  business_goal: The catalogue stays complete, consistent and searchable at scale.
+  actors:
+  - Art Cataloguer
+  - Inventory Manager
+  starting_state: —
+  ending_state: —
+  preconditions: []
+  required_master_data:
+  - 'reference catalogues: medium, colour, origin, style, category (TC-ART-014..018)'
+  steps:
+  - create_full_record
+  - 'import_batch  # TC-ART-024'
+  - 'template_variant_sync  # TC-ART-003'
+  - 'barcode_constraints  # TC-ART-004/005'
+  - 'enrich_auction_consignment  # TC-ART-011/022'
+  - 'archive_unarchive  # TC-ART-026'
+  state_transitions:
+  - 'product: active ↔ archived'
+  business_rules:
+  - numeric barcode on template AND variant; duplication never clones barcode
+  expected_business_outcomes:
+  - catalogue fields survive migration with data (TC-DAT-011..013 backbone)
+  scenarios:
+  - create_full_record
+  - import_20_items
+  - variant_sync
+  - barcode_guards
+  - reference_data_crud (parameterized)
+  missing_scenarios:
+  - variant creation flow
+  - bulk edit at 69k scale (perf lane covers read)
+  open_questions:
+  - 'TC-NEW-007/TC-STU-009: inventory-value fix or retire'
+  - 'TC-NEW-008: Studio fields → code'
+  coverage_status: 88%
+  automation_status: not automated; Wave 2 TransactionCase-friendly
+  priority: P1
+  risk: 'Medium: mostly data-preservation risk, covered by DAT backbone'
+  related_existing_tests:
+    count: 26
+    p0: 3
+    tc_ids:
+    - TC-ART-001
+    - TC-ART-002
+    - TC-ART-003
+    - TC-ART-004
+    - TC-ART-005
+    - TC-ART-006
+    - TC-ART-007
+    - TC-ART-008
+    - TC-ART-009
+    - TC-ART-010
+    - TC-ART-011
+    - TC-ART-012
+    - TC-ART-013
+    - TC-ART-014
+    - TC-ART-015
+    - TC-ART-016
+    - TC-ART-017
+    - TC-ART-018
+    - TC-ART-019
+    - TC-ART-020
+    - TC-ART-021
+    - TC-ART-022
+    - TC-ART-023
+    - TC-ART-024
+    - TC-ART-025
+    - TC-ART-026
+  related_features:
+  - '36'
+  - '37'
+  - '39'
+  - '40'
+  - '41'
+  - '42'
+  - '43'
+  related_user_stories: resolved via tc → feature → User Story Coverage sheet (see normalized DB import)
+- workflow_id: WF-CERT
+  workflow_name: Certificates of Authenticity & Label Printing
+  business_domain: Documents (py3o + LibreOffice) after sale
+  description: Print certificate (4-template fallback by provenance/date) citing the most recent confirmed sale;
+    print Avery labels 30/60/90/120 and 6-up backtags.
+  business_goal: Gallery-critical documents render correctly for any product state.
+  actors:
+  - Gallery Manager
+  - Art Cataloguer
+  starting_state: Sold or catalogued item
+  ending_state: PDF rendered with correct template & content
+  preconditions:
+  - LibreOffice present (single point of failure — TC-NEW-005)
+  required_master_data:
+  - ODT templates (4)
+  - label formats (5)
+  steps:
+  - select_product_or_variant
+  - 'render_certificate  # fallback matrix TC-LBL-002..005'
+  - 'verify_recent_sale_citation  # TC-LBL-007'
+  - 'render_labels  # TC-LBL-008..010'
+  state_transitions: []
+  business_rules:
+  - 'fallback: full → no-date → no-provenance → neither'
+  - cites most recent CONFIRMED sale (state filter must match v19 states)
+  expected_business_outcomes:
+  - PDF text contains expected provenance/date/customer/amount
+  scenarios:
+  - fallback_matrix (parameterized ×4)
+  - recent_sale_citation
+  - avery_sizes (parameterized ×4)
+  - backtag
+  - from_template_and_variant_lists
+  missing_scenarios:
+  - visual layout check (manual spot check by design)
+  open_questions:
+  - py3o+LibreOffice vs native QWeb rewrite on v19 (assessment recommends investigating QWeb)
+  coverage_status: 90% — best-designed group
+  automation_status: not automated; render-assert via PDF text extraction
+  priority: P1 — automate once v19 rendering strategy decided
+  risk: High business criticality, well-understood scope
+  related_existing_tests:
+    count: 13
+    p0: 7
+    tc_ids:
+    - TC-LBL-001
+    - TC-LBL-002
+    - TC-LBL-003
+    - TC-LBL-004
+    - TC-LBL-005
+    - TC-LBL-006
+    - TC-LBL-007
+    - TC-LBL-008
+    - TC-LBL-009
+    - TC-LBL-010
+    - TC-LBL-011
+    - TC-SMK-011
+    - TC-NEW-005
+  related_features:
+  - '20'
+  - '21'
+  - '38'
+  related_user_stories: resolved via tc → feature → User Story Coverage sheet (see normalized DB import)
+- workflow_id: WF-RECOVERY
+  workflow_name: Failed Integration Operation → Recovery
+  business_domain: omni_log + queue_job across all channel flows
+  description: A channel operation fails; the log captures payloads; ops inspects, re-imports/re-exports (single
+    or batch), resolves; queue requeues transient failures; GC reclaims stuck jobs.
+  business_goal: No lost orders/exports; every failure is visible, actionable, and recoverable.
+  actors:
+  - Integration Admin
+  - Operations Manager
+  starting_state: 'A failing operation (mock: API 500/timeout)'
+  ending_state: Operation recovered; log resolved; business record correct and not duplicated
+  preconditions:
+  - omni_log retention working (TC-DAT-021/TC-LOG-008)
+  required_master_data: []
+  steps:
+  - induce_failure
+  - 'verify_log_entry_with_payload  # TC-LOG-001/006'
+  - 're_run_from_log  # TC-LOG-002/003/004'
+  - verify_business_record_intact
+  - 'verify_no_duplicate  # ties to G3'
+  state_transitions:
+  - 'queue.job: failed → requeued → done'
+  - 'log: failed → resolved'
+  business_rules:
+  - transient DB errors auto-requeue on schedule (TC-CHN-009)
+  - lock contention postpones, not fails (TC-JOB-010)
+  expected_business_outcomes:
+  - recovered operation produces the same outcome as a clean run
+  scenarios:
+  - reimport_failed_order
+  - reexport_failed_listing
+  - batch_rerun
+  - stuck_job_gc
+  missing_scenarios:
+  - 'one chained E2E: kill API mid-import → recover → identical BOD'
+  open_questions: []
+  coverage_status: 82% piecewise
+  automation_status: not automated; needs mock edge (fault injection)
+  priority: P1
+  risk: 'Medium-high: operational resilience'
+  related_existing_tests:
+    count: 16
+    p0: 7
+    tc_ids:
+    - TC-LOG-001
+    - TC-LOG-002
+    - TC-LOG-003
+    - TC-LOG-004
+    - TC-LOG-005
+    - TC-LOG-006
+    - TC-LOG-007
+    - TC-LOG-008
+    - TC-CHN-009
+    - TC-JOB-002
+    - TC-JOB-003
+    - TC-JOB-004
+    - TC-JOB-008
+    - TC-JOB-010
+    - TC-JOB-013
+    - TC-DAT-021
+  related_features:
+  - '80'
+  - '81'
+  - '82'
+  - '83'
+  - '84'
+  - '88'
+  - '92'
+  - '94'
+  - '95'
+  - '98'
+  - '99'
+  related_user_stories: resolved via tc → feature → User Story Coverage sheet (see normalized DB import)
+- workflow_id: WF-BULK
+  workflow_name: Bulk Data Maintenance Wizards
+  business_domain: 'Mass updates: customer taxes, fiscal positions, categories, customer type'
+  description: Select records → run wizard → guarded bulk write → audit trail.
+  business_goal: Mass maintenance without record-by-record edits, safely scoped to the selection.
+  actors:
+  - Sales Manager
+  - Accountant
+  - E-commerce Manager
+  - System Admin
+  starting_state: Record selection on list view
+  ending_state: Exactly the selected records updated, attributably
+  preconditions:
+  - wizard ACLs configured (TC-BLK-017)
+  required_master_data: []
+  steps:
+  - select_records
+  - open_wizard
+  - 'apply  # respects selection TC-BLK-015, select-all domain TC-BLK-016'
+  - 'verify_attribution  # TC-BLK-018'
+  state_transitions: []
+  business_rules:
+  - empty selection blocked; field-missing guard surfaces (TC-BLK-011)
+  expected_business_outcomes:
+  - no writes outside selection
+  scenarios:
+  - each_wizard_happy (×5, parameterized)
+  - empty_selection_guard
+  - select_all_filtered_domain
+  - acl_denied
+  - thousand_records (perf lane)
+  missing_scenarios: []
+  open_questions: []
+  coverage_status: 88%
+  automation_status: not automated; cheapest TransactionCase wins
+  priority: P2
+  risk: 'Medium: blast radius of a bad bulk write'
+  related_existing_tests:
+    count: 18
+    p0: 3
+    tc_ids:
+    - TC-BLK-001
+    - TC-BLK-002
+    - TC-BLK-003
+    - TC-BLK-004
+    - TC-BLK-005
+    - TC-BLK-006
+    - TC-BLK-007
+    - TC-BLK-008
+    - TC-BLK-009
+    - TC-BLK-010
+    - TC-BLK-011
+    - TC-BLK-012
+    - TC-BLK-013
+    - TC-BLK-014
+    - TC-BLK-015
+    - TC-BLK-016
+    - TC-BLK-017
+    - TC-BLK-018
+  related_features:
+  - '24'
+  - '25'
+  - '26'
+  - '27'
+  - '32'
+  - '33'
+  - '5'
+  - 5, 6, 24, 26, 32
+  - '6'
+  related_user_stories: resolved via tc → feature → User Story Coverage sheet (see normalized DB import)
+- workflow_id: WF-CHANNEL-OPS
+  workflow_name: Channel Onboarding, Configuration & Health
+  business_domain: ecommerce.channel lifecycle
+  description: Connect a Shopify store (OAuth), configure, safe-mode guard, monitor sync health, dashboards, disconnect.
+  business_goal: Channels are connectable, observable, and safely testable.
+  actors:
+  - Integration Admin
+  - System Admin
+  starting_state: No/existing channel
+  ending_state: Channel connected & healthy, or cleanly disconnected
+  preconditions: []
+  required_master_data:
+  - OAuth app credentials (field-level security TC-SEC-007)
+  steps:
+  - 'connect_oauth  # TC-SHP-001 (+ state validation TC-SEC-001)'
+  - configure_channel
+  - 'enable_safe_mode  # TC-CHN-003 — platform prerequisite'
+  - 'verify_health_crons  # TC-CHN-010'
+  - 'disconnect  # TC-SHP-002'
+  state_transitions:
+  - 'channel: draft → connected → disconnected'
+  business_rules:
+  - safe mode prevents ALL writes to live store
+  expected_business_outcomes:
+  - config/credentials survive migration (TC-DAT-015, TC-CHN-001)
+  scenarios:
+  - connect_disconnect
+  - safe_mode_guard
+  - onboarding_new_channel
+  - currency_unit_refresh
+  missing_scenarios:
+  - token expiry / re-auth flow
+  open_questions: []
+  coverage_status: 84%
+  automation_status: not automated
+  priority: P2 (but safe-mode assertion ships with MVP as a guard)
+  risk: Medium
+  related_existing_tests:
+    count: 12
+    p0: 5
+    tc_ids:
+    - TC-CHN-001
+    - TC-CHN-002
+    - TC-CHN-003
+    - TC-CHN-004
+    - TC-CHN-005
+    - TC-CHN-006
+    - TC-CHN-011
+    - TC-CHN-012
+    - TC-SHP-001
+    - TC-SHP-002
+    - TC-SHP-033
+    - TC-DAT-015
+  related_features:
+  - '71'
+  - '81'
+  - '85'
+  - '86'
+  - '90'
+  related_user_stories: resolved via tc → feature → User Story Coverage sheet (see normalized DB import)
+- workflow_id: WF-JOBS
+  workflow_name: Background Job Platform (Queue)
+  business_domain: queue_job OCA + queue_job_enhancement — infrastructure
+  description: Enqueue → channel capacity → run → fail → retry policy → identity dedupe/override → GC/vacuum; security
+    groups and multi-company rules.
+  business_goal: The async backbone every channel flow rides on behaves identically after the OCA v19 rebase.
+  actors:
+  - Integration Admin
+  - Developer
+  - System Admin
+  starting_state: Runner active (or NO_DELAY test mode)
+  ending_state: Jobs reach done/failed per policy
+  preconditions:
+  - runner reachable (TC-SMK-010)
+  required_master_data: []
+  steps:
+  - 'enqueue  # with context TC-JOB-011'
+  - 'run_end_to_end  # TC-JOB-001'
+  - 'fail_and_requeue  # TC-JOB-002/003'
+  - 'identity_dedupe  # TC-JOB-007/008/009'
+  - 'gc_stuck  # TC-JOB-013'
+  state_transitions:
+  - 'queue.job: pending → enqueued → started → done/failed'
+  business_rules:
+  - identity key prevents duplicate pending jobs
+  - lock contention → postponed retry (TC-JOB-010)
+  expected_business_outcomes:
+  - job history/config survive migration (TC-DAT-020)
+  scenarios:
+  - run_e2e
+  - fail_requeue
+  - identity_dedupe
+  - capacity_limits
+  - retry_policy
+  - context_preservation
+  missing_scenarios: []
+  open_questions:
+  - v19 = OCA rebase; re-port queue_job_enhancement on top
+  coverage_status: 92% — strongest suite
+  automation_status: not automated; TC-JOB-018 gives test-mode hook
+  priority: P1* (infrastructure — indirectly exercised by every MVP run)
+  risk: High leverage, low ambiguity
+  related_existing_tests:
+    count: 20
+    p0: 6
+    tc_ids:
+    - TC-JOB-001
+    - TC-JOB-002
+    - TC-JOB-003
+    - TC-JOB-004
+    - TC-JOB-005
+    - TC-JOB-006
+    - TC-JOB-007
+    - TC-JOB-008
+    - TC-JOB-009
+    - TC-JOB-010
+    - TC-JOB-011
+    - TC-JOB-012
+    - TC-JOB-013
+    - TC-JOB-014
+    - TC-JOB-015
+    - TC-JOB-016
+    - TC-JOB-017
+    - TC-JOB-018
+    - TC-SMK-010
+    - TC-DAT-020
+  related_features:
+  - '100'
+  - '92'
+  - '93'
+  - '94'
+  - '95'
+  - '96'
+  - '97'
+  - '98'
+  - '99'
+  related_user_stories: resolved via tc → feature → User Story Coverage sheet (see normalized DB import)

@@ -1,0 +1,11 @@
+.env
+.env.local
+config/local.yaml
+*.pid
+wip/
+venv/
+__pycache__/
+*.pyc
+artifacts/
+data/
+.pytest_cache/

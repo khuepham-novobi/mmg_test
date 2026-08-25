@@ -1,0 +1,27 @@
+# Target Odoo environments. Values come from .env (see .env.example) —
+# nothing here is hard-coded. Add more environments (staging, UAT…) freely;
+# each needs a matching adapter version ("15" or "19").
+environments:
+  odoo15:
+    name: "Odoo 15"
+    version: "15"
+    base_url: "${ODOO15_URL:http://localhost:8015}"
+    db: "${ODOO15_DB:odoo15_test}"
+    username: "${ODOO15_USERNAME:admin}"
+    password: "${ODOO15_PASSWORD:admin}"
+    # direct SQL for DATA_RECONCILIATION tests (empty host = SQL tests BLOCKED)
+    pg_host: "${ODOO15_PG_HOST:}"
+    pg_port: "${ODOO15_PG_PORT:5432}"
+    pg_user: "${ODOO15_PG_USER:}"
+    pg_password: "${ODOO15_PG_PASSWORD:}"
+  odoo19:
+    name: "Odoo 19"
+    version: "19"
+    base_url: "${ODOO19_URL:http://localhost:8019}"
+    db: "${ODOO19_DB:odoo19_test}"
+    username: "${ODOO19_USERNAME:admin}"
+    password: "${ODOO19_PASSWORD:admin}"
+    pg_host: "${ODOO19_PG_HOST:}"
+    pg_port: "${ODOO19_PG_PORT:5432}"
+    pg_user: "${ODOO19_PG_USER:}"
+    pg_password: "${ODOO19_PG_PASSWORD:}"

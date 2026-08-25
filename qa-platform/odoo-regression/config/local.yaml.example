@@ -1,0 +1,25 @@
+# Copy to config/local.yaml and edit for your workstation (local.yaml is
+# gitignored). Loaded by backend/config.py after .env; real environment
+# variables still win over these values.
+env:
+  # Odoo 15 QA target — always a dedicated clone, never a production copy.
+  ODOO15_URL: http://localhost:8076
+  ODOO15_DB: <your v15 QA clone, e.g. mmg_qa15>
+
+  # Read-only PostgreSQL access for the DATA_RECONCILIATION tests.
+  # Omit to have those tests report BLOCKED instead of running.
+  ODOO15_PG_HOST: localhost
+  ODOO15_PG_PORT: 5433
+  ODOO15_PG_USER: <db user>
+  ODOO15_PG_PASSWORD: <db password>
+
+  # Odoo 19 target, once a local instance exists.
+  ODOO19_URL: http://localhost:8019
+  ODOO19_DB: <your v19 QA database>
+  ODOO19_PG_HOST: localhost
+  ODOO19_PG_PORT: 5433
+  ODOO19_PG_USER: <db user>
+  ODOO19_PG_PASSWORD: <db password>
+
+  # false opens a real Chromium window for UI tests
+  HEADLESS: "true"
