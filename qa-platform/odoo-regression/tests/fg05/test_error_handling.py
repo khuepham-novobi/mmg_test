@@ -12,8 +12,10 @@ What it proves (workbook Expected Result, one ctx.check per line)
 * step 3 — ``res.config.settings.avatax_ping()`` reports an authentication
   FAILURE, not success;
 * step 6 — Compute Taxes raises a readable message that explains the
-  credentials were rejected, not a raw traceback and not a blank screen (the
-  text is logged: the If-It-Fails column asks for it verbatim);
+  credentials were rejected, not a raw traceback and not a blank screen. The
+  message asserted on is the FULL server text, re-read untruncated (see the
+  adaptation below); it is logged verbatim, which is what the If-It-Fails
+  column asks the tester to attach to the defect;
 * step 7 — the invoice carries NO tax figure, no tax journal item, is still
   in DRAFT and is still editable — not half-taxed and not locked;
 * step 9 — after the restore, Test connection reports success again;
@@ -62,24 +64,36 @@ Documented adaptations
   exactly reversible, which is what a break-and-restore case needs.
   ``avatax_ping()`` is still called on a real ``res.config.settings`` record,
   because that is where the method is defined.
-* **The recorded step-6 text is the LAST line of the server message.** The
+* **Step 6 asserts the FULL server message, not the last line of it.** The
   platform's RPC layer collapses a multi-line Odoo error to its final line
-  (``adapters/base.py:156``); the readable Avalara detail is that final line,
-  but a tester filing the defect should attach the whole pop-up. The step-6
-  readability floor is therefore calibrated against that ONE surviving
-  sentence — Odoo's own wordy title sits on the line before it and never
-  arrives (``…/account_external_tax_mixin.py:287-295``).
+  (``adapters/base.py:156``), and ``_handle_response`` builds exactly that
+  shape — ``"<Odoo title>\\n<Avalara detail>"``
+  (``…/account_external_tax_mixin.py:287-295``). Judging readability on the
+  truncated form judges the TRANSPORT, not the product: a perfectly readable
+  two-line pop-up can arrive as one short fragment and be reported as a
+  defect. The step therefore re-reads ``error.data.message`` untouched
+  through ``tests.fg05.common.server_error_message`` — the same helper
+  TC-TAX-007 uses for its address guard, using only the public
+  ``framework.fg_common.http_session``; nothing in ``framework/`` is
+  modified. The expectation is unchanged (a readable explanation, not a raw
+  trace) and the whole message is logged verbatim. Re-issuing the call is
+  safe HERE and only here: the credential is deliberately invalid at step 6,
+  so the repeat is a second rejected authentication that files nothing.
+  Step 10 runs with the real key restored and keeps the adapter's message,
+  because repeating a Compute Taxes there would send a second document.
 * **The art item is checked to resolve an Avalara Tax Code before the break.**
   ``_prepare_avatax_document_line_service_call`` raises "The Avalara Tax Code
   is required for …" *before* the HTTP call whenever the line's product,
   template and category chain resolve no ``product.avatax.category``
   (``account_avatax/models/product.py:29-57``,
   ``…/account_external_tax_mixin.py:88-95``). That would make step 6 pass on
-  the wrong error and step 10 fail for a reason unrelated to this test, so
-  the chain is read up front and — only when the database maps nothing — an
-  FG05 product category carrying a stock Avalara tax code is attached to the
-  fixture. On a correctly configured database this compensation never fires
-  and is not logged as applied.
+  the wrong error and step 10 fail for a reason unrelated to this test. The
+  fixture now carries one by construction — ``common.make_product`` files
+  every FG05 product under the shared FG05 AvaTax category
+  (``common.fg05_product_category``), which is BLOCKED up front if the
+  database holds no ``product.avatax.category`` at all. The chain is still
+  read back and asserted here, before any write: this test breaks a
+  credential, and it does so only once its own precondition is proven.
 * The ping verdict is asserted against the English source strings
   ``"Authentication success." / "Authentication failed."``
   (``account_avatax/models/res_company.py:138``); a runner user whose UI
@@ -95,9 +109,10 @@ from framework.registry import test_case
 from tests.fg05.common import (ADDRESS_PHOENIX_AZ, MARK, MODULE, WORKFLOW,
                                WORKFLOW_NAME, cleanup, compute_taxes,
                                doc_totals, make_invoice, make_partner,
-                               make_product, make_product_category,
-                               move_tax_lines, require_avatax_fiscal_position,
-                               require_sandbox, sweep_fg05, trace)
+                               make_product, move_tax_lines,
+                               require_avatax_fiscal_position,
+                               require_sandbox, server_error_message,
+                               sweep_fg05, trace)
 
 # Workbook Test Data — "type any obviously invalid string such as
 # INVALID-KEY-FOR-UAT" and "any art item, quantity 1, price 1,000.00".
@@ -123,10 +138,7 @@ CONNECTION_VOCABULARY = ("auth", "credential", "connect", "unauthor",
 
 RPC_ERROR_PREFIX = "account.move.button_external_tax_calculation failed: "
 
-# Stock Avalara tax code "Tangible personal property (tpp)" from
-# account_avatax/data/product.avatax.category.csv — the fallback used only if
-# the database maps no Avalara category anywhere in a product's chain.
-FALLBACK_AVATAX_CODE = "P0000000"
+COMPUTE_TAXES_METHOD = "button_external_tax_calculation"
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -266,17 +278,35 @@ def _test_connection(ctx):
     return False, _ping_verdict(raw), ""
 
 
-def _compute_outcome(ctx, move_id):
+def _compute_outcome(ctx, move_id, *, full_message=False):
     """Click Compute Taxes → ``(raised, message)``.
 
     The workbook expects a message on the failure path, so the RPC error is
     captured and asserted on rather than being allowed to ERROR the test.
+
+    ``full_message`` re-reads the server's UNTRUNCATED text through
+    ``common.server_error_message``. ``adapters/base.py:156`` keeps only
+    ``splitlines()[-1]``, while ``_handle_response`` returns
+    "<Odoo title>\\n<Avalara detail>"
+    (…/account_external_tax_mixin.py:287-295), so the truncated form would
+    have step 6 judge the transport rather than the product's own message.
+
+    Only step 6 asks for it. The re-issued call is a second
+    ``create_transaction`` attempt: at step 6 the API KEY is deliberately
+    invalid, so Avalara rejects it and nothing is filed. Step 10 runs with the
+    real key back and must not send a second document, so it keeps the
+    adapter's message.
     """
     try:
         compute_taxes(ctx, "account.move", move_id)
         return False, ""
     except OdooRPCError as exc:
-        return True, str(exc)
+        message = str(exc)
+        if full_message:
+            message = server_error_message(
+                ctx, "account.move", COMPUTE_TAXES_METHOD,
+                [move_id]) or message
+        return True, message
 
 
 @test_case(
@@ -296,8 +326,7 @@ def _compute_outcome(ctx, move_id):
     traceability=trace("TC-TAX-017"))
 def test_tax_017(ctx):
     rpc = ctx.adapter.rpc
-    created = {"account.move": [], "res.partner": [], "product.product": [],
-               "product.category": []}
+    created = {"account.move": [], "res.partner": [], "product.product": []}
     key_written = False
     move_id = None
 
@@ -364,38 +393,26 @@ def test_tax_017(ctx):
             # Without a resolvable Avalara tax code the line raises "The
             # Avalara Tax Code is required for …" BEFORE the HTTP call, which
             # would make step 6 pass on the wrong error and step 10 fail for
-            # an unrelated reason. Prove the code resolves; only compensate
-            # when the database maps nothing anywhere in the chain.
+            # an unrelated reason. make_product files every FG05 fixture under
+            # the shared FG05 AvaTax category (common.fg05_product_category),
+            # which BLOCKS if the database carries no product.avatax.category
+            # at all — so this is a read-back of a guaranteed precondition,
+            # deliberately made BEFORE the credential is broken.
             avatax_categ, categ_source = _resolve_avatax_category(rpc,
                                                                   product_id)
             if not avatax_categ:
-                fallback = (
-                    rpc.search("product.avatax.category",
-                               [("code", "=", FALLBACK_AVATAX_CODE)], limit=1)
-                    or rpc.search("product.avatax.category", [], limit=1,
-                                  order="id"))
-                if not fallback:
-                    ctx.blocked(
-                        "no product.avatax.category record exists on this "
-                        "database, so no product can carry an Avalara Tax "
-                        "Code and Compute Taxes can never reach Avalara — "
-                        "the account_avatax data file "
-                        "(data/product.avatax.category.csv) has not loaded. "
-                        "Reinstall/upgrade Odoo Enterprise 'account_avatax' "
-                        "before running FG-05.")
-                categ_id = make_product_category(
-                    ctx, "TAX-017 Taxable Goods",
-                    avatax_category_id=fallback[0])
-                created["product.category"].append(categ_id)
-                rpc.write("product.product", [product_id],
-                          {"categ_id": categ_id})
-                avatax_categ, categ_source = _resolve_avatax_category(
-                    rpc, product_id)
-                ctx.log(f"setup compensation: nothing in this database's "
-                        f"product/category chain mapped an Avalara Tax Code, "
-                        f"so the fixture was put in an FG05 category "
-                        f"carrying product.avatax.category #{fallback[0]} — "
-                        f"report the unmapped default category separately")
+                ctx.blocked(
+                    f"the FG05 fixture product #{product_id} resolves no "
+                    f"Avalara Tax Code even though common.make_product filed "
+                    f"it under the FG05 AvaTax product category: nothing in "
+                    f"its product -> template -> category chain carries a "
+                    f"product.avatax.category "
+                    f"(account_avatax/models/product.py:29-57). Compute "
+                    f"Taxes would then fail with 'The Avalara Tax Code is "
+                    f"required for ...' for a reason that has nothing to do "
+                    f"with the credential this case breaks, so the break is "
+                    f"NOT applied. Check that the FG05 category kept its "
+                    f"Avatax Category, then re-run.")
             ctx.check_true(
                 "the art item resolves an Avalara Tax Code, so a failing "
                 "Compute Taxes at step 6 can only be the broken credential",
@@ -456,14 +473,20 @@ def test_tax_017(ctx):
 
             with ctx.step("Step 5-6 (workbook): click Compute Taxes and read "
                           "the message that appears, in full"):
-                raised, message = _compute_outcome(ctx, move_id)
+                # full_message=True: the readability expectation below is
+                # about the message the SERVER produced, so the untruncated
+                # error.data.message is re-read rather than the last line
+                # adapters/base.py:156 kept. Safe here — the credential is
+                # invalid at this point, so the repeat is a second rejected
+                # authentication and files no document.
+                raised, message = _compute_outcome(ctx, move_id,
+                                                   full_message=True)
                 message = _redact(message, [original_key])
                 # The If-It-Fails column asks for this text verbatim on the
-                # defect. adapters/base.py:156 keeps only the LAST line of a
-                # multi-line Odoo error, so say so next to it.
-                ctx.log(f"Step 6 message (last line of the server error, per "
-                        f"adapters/base.py:156 — attach the whole pop-up to "
-                        f"the defect): {message!r}")
+                # defect, so the WHOLE message is logged.
+                ctx.log(f"Step 6 message (full server text, re-read "
+                        f"untruncated via common.server_error_message): "
+                        f"{message!r}")
                 ctx.check_true(
                     "Step 6: Compute Taxes reports an error instead of "
                     "silently succeeding against a rejected credential",
@@ -482,20 +505,21 @@ def test_tax_017(ctx):
                 words = [w for w in body.split()
                          if any(c.isalpha() for c in w)]
                 letters = sum(1 for c in body if c.isalpha())
-                # Calibrated to what SURVIVES adapters/base.py:156, not to the
-                # whole pop-up. _handle_response returns
+                # Asserted on the WHOLE server message, not on the
+                # fragment the transport left. _handle_response returns
                 # "<Odoo title>\n<Avalara detail>"
-                # (…/account_external_tax_mixin.py:287-295), so the only line
-                # that reaches here is ONE short Avalara detail sentence
-                # ("Authentication Incomplete."; the module's own fixture
-                # shows the shape at account_avatax/tests/test_avatax.py:172
-                # "Document not found.") or, on the http-error branch, the
-                # response title alone ("Unauthorized"). A higher floor would
-                # report a false defect against a correctly-behaving system
-                # and would stop the run before steps 9 and 10. What the
-                # workbook actually rules out is kept: a blank screen and a
-                # bare numeric code both still FAIL. "Explains what happened"
-                # is asserted separately, by CONNECTION_VOCABULARY below.
+                # (…/account_external_tax_mixin.py:287-295) and
+                # adapters/base.py:156 keeps only that last line, so a
+                # perfectly readable two-line pop-up could arrive as one
+                # short fragment and be reported as a defect it is not.
+                # The floor stays deliberately low — a genuine Avalara
+                # detail can be one short sentence ("Authentication
+                # Incomplete."; the module's own fixture shows the shape
+                # at account_avatax/tests/test_avatax.py:172 "Document
+                # not found.") — and it still rules out exactly what the
+                # workbook rules out: a blank screen and a bare code both
+                # FAIL. "Explains what happened" is asserted separately,
+                # by CONNECTION_VOCABULARY below.
                 ctx.check_true(
                     "Step 6: the message is readable text — not a blank "
                     "screen and not a bare code",

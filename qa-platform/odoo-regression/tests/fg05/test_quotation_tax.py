@@ -93,7 +93,9 @@ Documented adaptations
    call through the public ``framework.fg_common.http_session`` helper and
    reads ``error.data.message`` untouched. Nothing in the framework is
    modified, and the repeat is safe because the raised constraint rolled its
-   transaction back.
+   transaction back. The helper itself now lives in
+   ``tests.fg05.common.server_error_message`` — TC-TAX-017 asserts the
+   readability of the same untruncated text.
 5. **"Materially lower" is quantified.** TC-TAX-009's second expectation is
    asserted as *Montana < Arizona* AND *Montana at most half of Arizona*.
    Arizona's state rate alone is 5.6 % and Montana levies no state sales tax,
@@ -114,11 +116,8 @@ Avalara account by any path.
 """
 from __future__ import annotations
 
-import json
-import urllib.request
-
 from adapters.base import OdooRPCError
-from framework.fg_common import http_session, m2o_id
+from framework.fg_common import m2o_id
 from framework.registry import test_case
 from tests.fg05.common import (ADDRESS_INCOMPLETE, ADDRESS_MISSOULA_MT,
                                ADDRESS_PHOENIX_AZ, MODULE, WORKFLOW,
@@ -127,7 +126,8 @@ from tests.fg05.common import (ADDRESS_INCOMPLETE, ADDRESS_MISSOULA_MT,
                                doc_totals, make_partner, make_product,
                                make_quotation,
                                require_avatax_fiscal_position,
-                               require_sandbox, require_v19, sweep_fg05, trace)
+                               require_sandbox, require_v19,
+                               server_error_message, sweep_fg05, trace)
 
 # First line of the refusal raised by
 # mmg_account_avatax_enhancement/models/account_external_tax_mixin.py
@@ -168,43 +168,18 @@ def _sandbox_ready(config: dict) -> bool:
 
 
 def _server_error_message(ctx, model: str, method: str, *args) -> str:
-    """Repeat one model call over a raw web session and return the FULL error.
+    """The FULL text of a server error, not the last line the adapter kept.
 
     ``adapters.base.OdooRPC.call`` keeps only ``splitlines()[-1]`` of a server
     error, so a multi-line ``ValidationError`` reaches the test with its first
-    line already gone. TC-TAX-007's Expected Result is about that first line,
-    so the identical ``/web/dataset/call_kw`` POST is re-issued here through
-    ``framework.fg_common.http_session`` (a public framework helper) and
-    ``error.data.message`` is read untouched.
+    line already gone. TC-TAX-007's Expected Result is about that first line.
 
-    Repeating the call is safe: the exception that brought us here rolled its
-    transaction back, so the first attempt wrote nothing.
-
-    Returns ``""`` when the repeat succeeds or when the raw read is not
-    possible — the caller then falls back to the adapter's truncated message.
+    The implementation is shared with TC-TAX-017, which needs the same
+    untruncated text for its step-6 readability assertion — see
+    :func:`tests.fg05.common.server_error_message` for how the call is
+    re-issued and why repeating an ALREADY-FAILED call writes nothing.
     """
-    payload = json.dumps({
-        "jsonrpc": "2.0", "method": "call", "id": 1,
-        "params": {"model": model, "method": method,
-                   "args": list(args), "kwargs": {}},
-    }, default=str).encode()
-    request = urllib.request.Request(
-        f"{ctx.env.base_url}/web/dataset/call_kw", data=payload,
-        headers={"Content-Type": "application/json"})
-    try:
-        opener = http_session(ctx.env)
-        with opener.open(request, timeout=900) as response:
-            reply = json.load(response)
-    except (OSError, ValueError, RuntimeError) as exc:
-        ctx.log(f"[evidence] could not re-read the untruncated server error "
-                f"for {model}.{method}: {exc} — falling back to the adapter's "
-                f"last-line-only message")
-        return ""
-    error = reply.get("error")
-    if not error:
-        return ""
-    data = error.get("data") or {}
-    return str(data.get("message") or error.get("message") or "").strip()
+    return server_error_message(ctx, model, method, *args)
 
 
 def _press_compute_taxes(ctx, model: str, record_id: int) -> str:

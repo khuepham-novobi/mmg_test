@@ -1621,12 +1621,22 @@ def sweep_fg06(ctx):
         confirmed = rpc.search("sale.order",
                                [("partner_id.name", "like", marker),
                                 ("state", "=", "sale")] + scope)
-        if confirmed:
+        # OdooAdapter.cancel_order takes ONE order id (adapters/base.py:271
+        # `order_id: int`) and wraps it into the call's ids list itself.
+        # Handing it the search result sent ids=[[id, …]], which Odoo browses
+        # into a record whose id is a list; the first field read in
+        # sale.order.action_cancel then uses it as a cache key and raises
+        # TypeError: unhashable type: 'list'
+        # (odoo/orm/environments.py:709). The sweep swallowed that as "not
+        # cancellable", so confirmed FG06 orders were never cancelled and
+        # never swept — a repeatability hole (AUTOMATION_CONVENTIONS rule 3).
+        # Cancel them one at a time so one stuck order cannot hide the rest.
+        for order_id in confirmed:
             try:
-                ctx.adapter.cancel_order(confirmed)
+                ctx.adapter.cancel_order(order_id)
             except OdooRPCError as exc:
-                ctx.log(f"[sweep] {len(confirmed)} FG06 order(s) not "
-                        f"cancellable ({exc}) — left in place")
+                ctx.log(f"[sweep] FG06 order {order_id} not cancellable "
+                        f"({exc}) — left in place")
     except OdooRPCError:
         pass
     _drop("sale.order",

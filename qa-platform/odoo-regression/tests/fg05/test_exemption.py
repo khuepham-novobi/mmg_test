@@ -52,10 +52,16 @@ Documented adaptations
 3. **A missing Avalara Tax Code is BLOCKED, not FAILED.**
    ``_prepare_avatax_document_line_service_call`` raises
    ``UserError('The Avalara Tax Code is required for ... See
-   https://taxcode.avatax.avalara.com/')`` when the fixture product's category
-   chain resolves no ``product.avatax.category``. That is a fixture/setup gap
-   in the target database, not the exemption behaviour under test, so it is
-   reported as BLOCKED with the remedy. It is recognised by the
+   https://taxcode.avatax.avalara.com/')`` when the line's product resolves no
+   ``product.avatax.category``. The fixture now carries one by construction:
+   ``common.make_product`` files every FG05 product under the shared FG05
+   AvaTax product category (``common.fg05_product_category``), which itself
+   BLOCKS if the database holds no ``product.avatax.category`` at all. This
+   guard therefore no longer fires for the ordinary "the default product
+   category has no AvaTax code" reason it was written for — if it fires now,
+   the code did NOT survive on the FG05 category, which is still a setup gap
+   rather than the exemption behaviour under test, so it stays BLOCKED with a
+   remedy that names the real cause. It is recognised by the
    ``taxcode.avatax.avalara.com`` marker, because the RPC layer keeps only the
    LAST line of a multi-line server message. **Every other** error is recorded
    and fails the workbook's "Neither invoice shows an error" expectation.
@@ -78,6 +84,9 @@ from tests.fg05.common import (ADDRESS_PHOENIX_AZ, MODULE, WORKFLOW,
 # See https://taxcode.avatax.avalara.com/" when a line's product resolves no
 # product.avatax.category. adapters.base.OdooRPC keeps only the last line of a
 # server message, so the URL — not the first line — is the reliable marker.
+# common.make_product now guarantees a resolvable code on every FG05 fixture,
+# so this pair should never match; it is kept as the tripwire that tells a
+# tax-code setup gap apart from a real exemption defect.
 TAX_CODE_MARKERS = ("taxcode.avatax.avalara.com",
                     "Avalara Tax Code is required")
 
@@ -243,13 +252,21 @@ def test_tax_013(ctx):
                 message = str(exc)
                 if any(marker in message for marker in TAX_CODE_MARKERS):
                     ctx.blocked(
-                        f"the fixture product resolves no Avalara Tax Code, "
-                        f"so account_avatax refused the document before any "
-                        f"tax was computed ({message}). This is a data-setup "
-                        f"gap in the target database, not the exemption "
-                        f"behaviour TC-TAX-013 covers: set an Avatax Category "
-                        f"(product.avatax.category) on the default product "
-                        f"category, the product template, or the product, "
+                        f"the fixture product #{product_id} resolves no "
+                        f"Avalara Tax Code, so account_avatax refused the "
+                        f"document before any tax was computed ({message}). "
+                        f"This is NOT the workbook's default-category gap any "
+                        f"more: common.make_product files every FG05 product "
+                        f"under the FG05 AvaTax product category, which "
+                        f"carries a product.avatax.category chosen from this "
+                        f"database. Reaching this line means that code did "
+                        f"not survive on the category or on the product "
+                        f"(product.product -> product.template -> "
+                        f"product.category walking parent_id, "
+                        f"account_avatax/models/product.py:29-57). Still a "
+                        f"data-setup gap in the target database rather than "
+                        f"the exemption behaviour TC-TAX-013 covers: check "
+                        f"the Avatax Category on the FG05 product category, "
                         f"then re-run")
                 errors.append(f"{label} invoice #{move_id}: {message}")
             totals = doc_totals(ctx, "account.move", move_id)

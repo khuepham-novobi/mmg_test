@@ -98,6 +98,42 @@ order's own draft invoices on its way through
 intervention this case does not need, so the invoice is logged as MMG
 behaviour and left alone; when the flag is off the workbook's line is
 asserted verbatim.
+
+Documented correction — ``cancel_order`` takes a single order id
+-----------------------------------------------------------------
+The first run that reached the cancellation reported *"Cancelling the order
+raised no error: expected True, got 'sale.order.action_cancel failed:
+unhashable type: list'"*. That was this test, not the product.
+
+``OdooAdapter.cancel_order(order_id: int)`` (``adapters/base.py:271``, v19
+override ``adapters/odoo19.py:20``) takes ONE id and does the wrapping
+itself — ``rpc.call("sale.order", "action_cancel", [order_id], …)``, where
+that list *is* the call's ids argument. Passing ``[order_id]`` therefore sent
+``ids=[[order_id]]``; ``odoo/service/model.py:87`` browses it into a record
+whose ``_ids[0]`` is a list, and the very first field read in
+``sale.order.action_cancel`` — ``any(order.locked for order in self)``,
+``addons/sale/models/sale_order.py:1327`` — hashes that id as a cache key
+(``odoo/orm/environments.py:709``, ``field_cache[record._ids[0]]``) and
+raises ``TypeError: unhashable type: 'list'``. The order never entered
+``_action_cancel`` at all, so nothing about deposits, MMG overrides or the
+JSON-RPC context was involved: the same call shape fails identically on an
+order with no deposit. ``tests/sales/test_cancel_quotation_api.py:44`` has
+always passed the scalar.
+
+For completeness on the other half of the adapter's comment: v19 has no
+cancellation wizard to bypass. The ``sale.order.cancel`` model is gone and
+``disable_cancel_warning`` survives only in two upstream test files, so
+``action_cancel`` returns the ``write()`` boolean, never an action dict —
+which is why the assertion below can read the state straight after the call.
+
+The one other way v19 refuses a cancellation is a **locked** order
+(``addons/sale/models/sale_order.py:1327-1328``), and ``action_confirm``
+locks what it confirms when the database has "Lock Confirmed Sales"
+(``sale.group_auto_done_setting``) enabled (``:1192``, ``:1199-1202``). That
+is a company-wide Sales setting, unrelated to deposits, that the manual
+tester meets as the form's Unlock button — so the step unlocks this case's
+own fixture order the same way, and logs it, instead of failing a P1 deposit
+case on it. No assertion moves: the order still has to cancel.
 """
 from __future__ import annotations
 
@@ -217,9 +253,29 @@ def test_dep_013(ctx):
                       before["deposit_count"])
 
         with ctx.step("Steps 2-3 / Expected line 1: the order cancels"):
+            # v19 refuses to cancel a LOCKED order
+            # (addons/sale/models/sale_order.py:1327-1328), and action_confirm
+            # locks every order it confirms when "Lock Confirmed Sales"
+            # (sale.group_auto_done_setting) is enabled on the database
+            # (:1192 and _should_be_locked, :1199-1202). That is a company-wide
+            # Sales setting with nothing to do with deposits, and the
+            # workbook's tester meets it as the form's own Unlock button. The
+            # fixture — this case's own order, never a pre-existing one — is
+            # therefore unlocked the same way, and the fact is logged rather
+            # than hidden. On a database without the setting this is a no-op.
+            if rpc.read("sale.order", [order_id], ["locked"])[0]["locked"]:
+                ctx.log("this database has Lock Confirmed Sales "
+                        "(sale.group_auto_done_setting) enabled, so "
+                        "confirming the fixture order locked it. Unlocking it "
+                        "through sale.order.action_unlock — the form's own "
+                        "Unlock button — so the workbook's cancellation step "
+                        "can run at all. Nothing about the deposit changes.")
+                rpc.call("sale.order", "action_unlock", [order_id])
             cancel_error = ""
             try:
-                ctx.adapter.cancel_order([order_id])
+                # ONE id, not a list — see the module docstring, "Documented
+                # correction — cancel_order takes a single order id".
+                ctx.adapter.cancel_order(order_id)
             except OdooRPCError as exc:
                 cancel_error = str(exc)
             ctx.check_true("Cancelling the order raised no error",

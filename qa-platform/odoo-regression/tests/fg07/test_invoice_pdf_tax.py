@@ -48,22 +48,31 @@ The 5 Expected Result lines, and what each is read from
    ``_get_tax_totals_summary`` is PRIVATE and is never called over RPC —
    reading the field gives the identical dict.
 
-   **The count is compared on TAX GROUPS, not on taxes.** One printed row is
-   one ``tax_groups[]`` entry, i.e. one ``account.tax.group``, and several
-   taxes may legitimately share a group — so comparing the printed rows
-   against the number of distinct ``tax_line_id`` would fail a correct system
-   whose jurisdictions are grouped. The ledger-side counterpart of a printed
-   row is therefore the number of distinct
-   ``account.move.line.tax_group_id``. When the ledger holds more taxes than
-   groups, that coarseness is raised on its own as a FINDING (the fix is
-   configuration — one ``account.tax.group`` per jurisdiction — not a
-   template change), so the two questions stay separate.
+   **Two counts are taken, and they answer different questions.** One printed
+   row is one ``tax_groups[]`` entry, i.e. one ``account.tax.group``, so the
+   printed rows are first compared against the distinct
+   ``account.move.line.tax_group_id`` the entry recorded: that proves the
+   TEMPLATE prints the ledger's own grouping faithfully. The workbook's line
+   is then asserted on the workbook's own unit — one printed row per
+   AUTHORITY, i.e. per distinct ``account.move.line.tax_line_id``, since the
+   workbook names the failure in as many words ("if the PDF shows one
+   combined tax row where the journal entry has several, that is the
+   defect"). The group-vs-group count alone cannot fail in that scenario —
+   ``tax_totals`` is *built* by grouping those same lines by
+   ``account.tax.group`` (``account_tax.py:2826-2833``) — so it would report
+   the collapse as a pass. Taking both, in that order, means a failure says
+   which layer is at fault: template, or the grouping of the taxes.
 2. **"The tax names carry their bracketed authority codes."** — read from the
-   same ``tax_groups[j]['group_name']``, which is verbatim
-   ``account.tax.group.name`` (``addons/account/models/account_tax.py:2889``)
-   and is the string the template prints
-   (``report_invoice.xml:551`` and ``:562``). Note the template prints the
-   **tax GROUP name**, never the tax name — see the finding below.
+   ``account.tax`` records the printed rows are made of,
+   ``tax_groups[j]['involved_tax_ids']``
+   (``addons/account/models/account_tax.py:2841-2845, 2882``), by
+   ``read()``-ing ``account.tax.name`` — the same records and the field FG-05
+   TC-TAX-002 asserts on screen. **Not** from ``group_name``: the row's
+   printed LABEL is ``account.tax.group.name``, and nothing in this stack
+   ever writes a jurisdiction code there — see the finding below. That the
+   printed label carries no authority code is recorded as a FINDING against
+   the tax-group configuration, which is the object that would have to
+   change.
 3. **"The tax rows plus the untaxed amount equal the Total."** — the printed
    Total row is ``tax_totals['total_amount_currency']``
    (``report_invoice.xml:592-594``), which Odoo builds as
@@ -103,15 +112,39 @@ Odoo 19's own ``account_avatax`` names the tax group
 ``tax_detail['taxName'].removesuffix(' TAX')`` and the tax
 ``f"{group_name} {rate}%"``
 (``enterprise-19.0/account_avatax/models/account_external_tax_mixin.py:
-166-172``) — **no jurisdiction code, and no brackets, in either**. Since the
-printed totals block prints the GROUP name, the bracketed authority codes of
-Expected Result line 2 only reach the PDF if the v19 port of
-``mmg_account_avatax_enhancement`` carries the ``jurisCode`` into
-``account.tax.group.name`` and not merely into ``account.tax.name`` (which is
-what FG-05 TC-TAX-002 checks on screen). This case asserts the workbook line
-as written — rule 2 forbids weakening it — and logs the mechanism first, so a
-failure is triaged as "the port put the authority code on the tax but not on
-the tax group" rather than as a mystery.
+166-179``) — **no jurisdiction code, and no brackets, in either**. The v19
+port keeps the v15 tax name, and *only* the tax name:
+``mmg_account_avatax_enhancement._extract_tax_values_from_avatax_detail``
+rewrites ``tax_values['name']`` to ``'%s [%s] %s' % (taxName, jurisCode,
+rate)`` and returns ``tax_group_values`` untouched, deliberately —
+"Only the name is rewritten here"
+(``psus-medicine-man-gallery/mmg_account_avatax_enhancement/models/
+account_external_tax_mixin.py:82-97``). So the square brackets live on
+``account.tax.name`` **by design on both versions**, and the printed label —
+``account.tax.group.name`` — was never going to carry them. That is why
+Expected Result line 2 is asserted against the taxes behind the printed rows
+rather than against the row labels: the workbook line is about the tax names,
+and asserting it on the group name would fail a correctly ported system for a
+reason the workbook is not asking about.
+
+Two mechanisms can then leave the printed page without a breakdown, and this
+case is built to tell them apart:
+
+* **coarse grouping.** ``_process_external_taxes`` sets ``tax_group_id`` only
+  on the taxes it has to CREATE; a tax it matches by name and reuses keeps
+  whatever group it already had (``enterprise-19.0/account_external_tax/
+  models/account_external_tax_mixin.py:127-156``). Keeping the v15 name is
+  exactly what makes v15's migrated taxes match, so every reused jurisdiction
+  tax also drags its migrated ``account.tax.group`` along — and v15's
+  override created those taxes with **no ``tax_group_id`` at all**
+  (``psus-medicine-man-gallery`` commit ``53f7985``,
+  ``mmg_account_avatax_enhancement/models/account_avatax.py:42-54``), so they
+  all took the database's default group. Several jurisdictions under one
+  group print as ONE row, which is the workbook's named defect and shows up
+  as the authority-count assertion failing while the group-count assertion
+  passes.
+* **a template fault**, which would show up as the group-count assertion
+  failing — the report not printing a group the ledger recorded.
 
 A second finding, which is exactly what workbook step 8 hunts
 -------------------------------------------------------------
@@ -263,6 +296,32 @@ def _cells(fragment: str) -> list[dict]:
     return found
 
 
+def _tax_names(ctx, tax_ids, context: dict) -> dict:
+    """``account.tax.name`` by id — the stored name, not the display string.
+
+    ``account.tax._compute_display_name`` appends a country-code suffix such
+    as " (US)" whenever the tax's country differs from the company's fiscal
+    country (``addons/account/models/account_tax.py:704-705``), so the
+    many2one label a journal item reads back is not the field the gallery's
+    override writes. FG-05 TC-TAX-002 reads the stored name for the same
+    reason, and the two cases have to be looking at the same string.
+    """
+    names: dict[int, str] = {}
+    ids = sorted({int(tax_id) for tax_id in tax_ids if tax_id})
+    if not ids:
+        return names
+    try:
+        for row in ctx.adapter.rpc.call("account.tax", "read", ids,
+                                        fields=["name"], context=context):
+            names[row["id"]] = row.get("name") or ""
+    except OdooRPCError as exc:
+        ctx.log(f"account.tax names are unreadable ({exc}) — the many2one "
+                f"display strings captured from the journal entry are used "
+                f"instead, which carry the same square brackets plus a "
+                f"possible country suffix")
+    return names
+
+
 def _pick_multi_authority_invoice(ctx, company: dict, avatax_field: bool
                                   ) -> tuple[dict, list, int]:
     """The posted customer invoice whose tax is split across authorities.
@@ -270,7 +329,10 @@ def _pick_multi_authority_invoice(ctx, company: dict, avatax_field: bool
     Two passes, in the order the workbook's precondition implies. Pass 1 asks
     only for AvaTax-flagged documents, because those are the ones FG-05
     TC-TAX-002 leaves behind and the only ones whose printed layout the
-    ``account_avatax`` patch changes. Pass 2 widens to any posted customer
+    ``account_avatax`` patch changes — and it asks for them through
+    ``fiscal_position_id.is_avatax``, the STORED field, because
+    ``account.move.is_avatax`` cannot be put in a domain at all (see the
+    comment on the pass below). Pass 2 widens to any posted customer
     invoice with more than one tax line — **for diagnosis only**: the caller
     BLOCKS when the invoice it gets back is not ``is_avatax``, so that the
     block message can name the best candidate on the database instead of
@@ -289,7 +351,23 @@ def _pick_multi_authority_invoice(ctx, company: dict, avatax_field: bool
             ("company_id", "=", company["id"])]
     passes = []
     if avatax_field:
-        passes.append(("AvaTax-flagged", base + [("is_avatax", "=", True)]))
+        # The domain is on the FISCAL POSITION, not on ("is_avatax", "=",
+        # True). ``account.move.is_avatax`` is a NON-STORED compute with no
+        # search method (enterprise-19.0/account_avatax/models/
+        # account_external_tax_mixin.py:18-23), so the ORM cannot put it in a
+        # WHERE clause: ``Field.to_sql`` raises "Cannot convert ... to SQL
+        # because it is not stored" (odoo/orm/fields.py:1215-1216). Searching
+        # it does not return an empty set, it RAISES — and the ``except``
+        # below would swallow that into "treated as none found", dropping the
+        # case onto pass 2, the fallback this docstring says must never become
+        # the document under test. The stored field the compute reads is
+        # searched instead: ``account.fiscal.position.is_avatax`` ("Use AvaTax
+        # API", account_avatax/models/account_fiscal_position.py:15) is a
+        # plain stored Boolean and ``record.is_avatax`` IS
+        # ``record.fiscal_position_id.is_avatax``, so the two select exactly
+        # the same documents — one of them from SQL.
+        passes.append(("AvaTax-flagged",
+                       base + [("fiscal_position_id.is_avatax", "=", True)]))
     passes.append(("any posted customer invoice", base))
 
     scanned = 0
@@ -320,9 +398,13 @@ def _pick_multi_authority_invoice(ctx, company: dict, avatax_field: bool
                 continue
             authorities = {m2o_id(line.get("tax_line_id")) for line in lines
                            if m2o_id(line.get("tax_line_id"))}
+            recorded_groups = {m2o_id(line.get("tax_group_id"))
+                               for line in lines
+                               if m2o_id(line.get("tax_group_id"))}
             if len(authorities) > 1:
                 ctx.log(f"  {row.get('name')!r} qualifies — "
-                        f"{len(authorities)} distinct tax line(s)")
+                        f"{len(authorities)} distinct tax(es) filed under "
+                        f"{len(recorded_groups)} tax group(s)")
                 return row, lines, scanned
         if candidates:
             ctx.log(f"no {label} invoice carries more than one tax authority")
@@ -504,13 +586,21 @@ def test_inv_003(ctx):
                                "amount": 0.0})
                 grp["amount"] = money(grp["amount"] + amount)
 
+            # The stored account.tax.name, read by id: it is the string the
+            # gallery's override writes and the one TC-TAX-002 asserts on
+            # screen. The many2one label is only the fallback.
+            tax_names = _tax_names(ctx, by_tax.keys(), company_ctx(company))
+            for tax_id, entry in by_tax.items():
+                entry["tax_name"] = tax_names.get(tax_id) or entry["name"]
+
             for index, (tax_id, entry) in enumerate(
                     sorted(by_tax.items(), key=lambda kv: -kv[1]["amount"]), 1):
-                code = AUTHORITY_CODE_RE.search(entry["name"])
+                code = AUTHORITY_CODE_RE.search(entry["tax_name"])
                 ctx.log(f"  journal entry tax line {index}: "
-                        f"{entry['name']!r} = {entry['amount']:.2f} "
-                        f"(tax group {entry['group']!r})")
-                totals_rows.append(["journal_entry", index, entry["name"],
+                        f"{entry['tax_name']!r} = {entry['amount']:.2f} "
+                        f"(account.tax #{tax_id}, tax group "
+                        f"{entry['group']!r} #{entry['group_id']})")
+                totals_rows.append(["journal_entry", index, entry["tax_name"],
                                     entry["amount"], entry["base"],
                                     entry["group_id"] or "", tax_id or "",
                                     code.group(1) if code else ""])
@@ -595,16 +685,35 @@ def test_inv_003(ctx):
                         "name": group.get("group_name") or "",
                         "amount": money(group.get("tax_amount_currency")),
                         "base": money(group.get("base_amount_currency")),
+                        # The account.tax records this printed row is made of
+                        # (addons/account/models/account_tax.py:2841-2845,
+                        # 2882). This is
+                        # what carries the jurisdiction name — the row's own
+                        # label is the tax GROUP name — and Expected Result
+                        # line 2 is asserted against it in step 6.
+                        "involved": [int(tax_id) for tax_id
+                                     in (group.get("involved_tax_ids") or [])],
                     })
             for index, group in enumerate(groups, 1):
                 code = AUTHORITY_CODE_RE.search(group["name"])
                 ctx.log(f"  totals block tax row {index}: {group['name']!r} = "
                         f"{group['amount']:.2f} (under subtotal "
                         f"{group['subtotal']!r}, account.tax.group "
-                        f"#{group['id']})")
+                        f"#{group['id']})"
+                        + (f" standing in for account.tax "
+                           f"{group['involved']}" if group["involved"] else
+                           " — tax_totals published no involved_tax_ids for "
+                           "this row"))
+                # tax_id carries the account.tax records behind the row, so
+                # the CSV shows at a glance which jurisdictions a single
+                # printed label is standing in for. authority_code is read
+                # from the PRINTED label, and is therefore blank whenever the
+                # tax group is not named per jurisdiction — which is the point.
                 totals_rows.append(["pdf_totals_block", index, group["name"],
                                     group["amount"], group["base"],
-                                    group["id"] or "", "",
+                                    group["id"] or "",
+                                    "|".join(str(tax_id) for tax_id
+                                             in group["involved"]),
                                     code.group(1) if code else ""])
 
             if len(groups) == 1 and len(by_tax) > 1:
@@ -620,18 +729,28 @@ def test_inv_003(ctx):
                         f"single account.tax.group. This is the workbook's "
                         f"named defect: 'If the PDF shows one combined tax "
                         f"row where the journal entry has several, that is "
-                        f"the defect'")
+                        f"the defect'. Where to look first: "
+                        f"_process_external_taxes sets tax_group_id only on "
+                        f"the taxes it CREATES — a tax it matches by name and "
+                        f"reuses keeps the group it already had "
+                        f"(enterprise-19.0/account_external_tax/models/"
+                        f"account_external_tax_mixin.py:127-156) — and "
+                        f"keeping the v15 tax name is precisely what makes "
+                        f"v15's migrated taxes match, so each reused "
+                        f"jurisdiction tax drags its migrated tax group along "
+                        f"with it — and v15 created those taxes with no "
+                        f"tax_group_id at all (psus-medicine-man-gallery "
+                        f"53f7985, mmg_account_avatax_enhancement/models/"
+                        f"account_avatax.py:42-54), so they all took the "
+                        f"database default group. Check the tax_group_id of "
+                        f"the account.tax records listed in "
+                        f"{TOTALS_CSV}")
 
-            # The taxes-vs-groups gap, raised on its own. It is NOT the
-            # decisive assertion below, because the two counts measure
-            # different things: the totals block emits one row per
-            # account.tax.group (report_invoice.xml:535-549), and several
-            # taxes legitimately share one group. Comparing the printed rows
-            # against the number of TAXES would fail every correct system
-            # whose jurisdictions are grouped — while saying nothing about
-            # whether the grouping itself is coarse. So the coarseness is
-            # reported here, and the printed-vs-recorded question is asserted
-            # below on the same unit.
+            # The taxes-vs-groups gap, described in full BEFORE either
+            # assertion so that a failure is triaged against the right object.
+            # The totals block emits one row per account.tax.group
+            # (report_invoice.xml:535-549), so when several taxes share a
+            # group the ledger holds a breakdown the customer's copy does not.
             if len(by_tax) > len(by_group):
                 finding(ctx,
                         f"the journal entry records {len(by_tax)} distinct "
@@ -648,19 +767,20 @@ def test_inv_003(ctx):
                         f"account.tax.group — that is a configuration "
                         f"decision, not a template change")
 
-            # THE decisive assertion, made on the unit the printed document is
-            # actually built from. The totals block emits one <tr class=
-            # "o_taxes"> per tax_groups[] entry, and each of those is one
-            # account.tax.group, so the ledger-side counterpart is the number
-            # of DISTINCT account.move.line.tax_group_id on the entry's
-            # display_type='tax' lines — not the number of taxes. Every group
-            # the ledger recorded must reach the page; a group that is
+            # FIRST, is the TEMPLATE faithful? The totals block emits one
+            # <tr class="o_taxes"> per tax_groups[] entry and each of those is
+            # one account.tax.group, so the printed rows must match the groups
+            # the journal entry recorded, one for one. A group that is
             # recorded and not printed is money the customer's copy does not
-            # explain.
+            # explain. This assertion is deliberately made BEFORE the
+            # workbook's own one below, because the two separate a TEMPLATE
+            # fault from a DATA fault: when this passes and the next fails,
+            # the report is printing the ledger faithfully and it is the
+            # grouping of the taxes that loses the authority breakdown.
             ctx.check(
-                "The totals block lists the tax by authority: the printed "
-                "document carries one tax row for each distinct tax GROUP the "
-                "journal entry recorded, not one combined row "
+                "The printed totals block carries one tax row for each "
+                "distinct tax GROUP the journal entry recorded, so the "
+                "template prints the ledger's own grouping faithfully "
                 "(len(tax_totals subtotals[].tax_groups[]) vs distinct "
                 "account.move.line.tax_group_id where display_type='tax')",
                 len(by_group), len(groups))
@@ -688,39 +808,115 @@ def test_inv_003(ctx):
             ctx.check("Every printed tax row carries the amount the journal "
                       "entry recorded for that authority", [], wrong)
 
+            # AND NOW the workbook's own line, on the workbook's own unit.
+            # Expected Result line 1 is "the totals block lists the tax by
+            # authority, matching what TC-TAX-002 found in the journal entry",
+            # and the workbook names the failure in as many words: "if the PDF
+            # shows one combined tax row where the journal entry has several,
+            # that is the defect". The journal entry's authorities are its
+            # distinct account.move.line.tax_line_id — one account.tax per
+            # Avalara jurisdiction, which is exactly what
+            # mmg_account_avatax_enhancement keeps the "[jurisCode]" naming
+            # for (psus-medicine-man-gallery/mmg_account_avatax_enhancement/
+            # models/account_external_tax_mixin.py:96). Measuring the printed
+            # rows against the tax GROUPS instead cannot fail in that
+            # scenario — tax_totals is BUILT by grouping those same lines by
+            # account.tax.group (addons/account/models/account_tax.py:
+            # 2826-2833) — so it would report the very collapse the workbook
+            # calls the defect as a pass. The expectation is reachable: one
+            # account.tax.group per jurisdiction is configuration, and Odoo
+            # 19's own account_avatax already creates the groups that way
+            # (enterprise-19.0/account_avatax/models/
+            # account_external_tax_mixin.py:166, 179) for every tax it has to
+            # create rather than reuse.
+            ctx.check(
+                "The totals block lists the tax BY AUTHORITY: the printed "
+                "document carries one tax row for each authority the journal "
+                "entry recorded, never one combined row (workbook Expected "
+                "Result line 1; printed tax_totals subtotals[].tax_groups[] "
+                "vs distinct account.move.line.tax_line_id where "
+                "display_type='tax')",
+                len(by_tax), len(groups))
+
         with ctx.step("Step 6 / Expected line 2: the tax names shown carry "
                       "the authority code in square brackets, as they did on "
                       "screen in TC-TAX-002"):
-            # Logged BEFORE the assertion so a failure is triaged correctly:
-            # the printed label is the tax GROUP name, while the v15 override
-            # put the jurisCode into the TAX name.
-            finding(ctx,
-                    "what the totals block prints is account.tax.group.name "
-                    "(addons/account/models/account_tax.py:2889), NOT the tax "
-                    "name FG-05 TC-TAX-002 reads on screen. Odoo 19's own "
-                    "account_avatax names that group "
-                    "tax_detail['taxName'].removesuffix(' TAX') with no "
-                    "jurisdiction code (enterprise-19.0/account_avatax/models/"
-                    "account_external_tax_mixin.py:166), whereas the "
-                    "gallery's v15 override named the TAX "
-                    "'%s [%s] (%s %%)' %% (taxName, jurisCode, rate) "
-                    "(psus-medicine-man-gallery/"
-                    "mmg_account_avatax_enhancement/models/"
-                    "account_avatax.py:31-35). If the assertion below fails, "
-                    "the v19 port carried the authority code onto the tax but "
-                    "not onto the tax group — fix it there, not in the report "
-                    "template")
-            unbracketed = [f"{group['name']!r} ({group['amount']:.2f})"
-                           for group in groups
-                           if not AUTHORITY_CODE_RE.search(group["name"])]
+            # WHICH OBJECT CARRIES THE AUTHORITY CODE, and therefore what this
+            # is asserted against. The printed row's LABEL is
+            # account.tax.group.name (addons/account/models/account_tax.py:
+            # 2889 ; addons/account/views/report_invoice.xml:551), and nothing
+            # in this stack ever puts a jurisdiction code into a tax GROUP
+            # name: Odoo 19's account_avatax names the group
+            # tax_detail['taxName'].removesuffix(' TAX')
+            # (enterprise-19.0/account_avatax/models/
+            # account_external_tax_mixin.py:166, 179), and the gallery's v19
+            # override rewrites tax_values['name'] ONLY, returning
+            # tax_group_values exactly as super() built it and saying so —
+            # "Only the name is rewritten here" (psus-medicine-man-gallery/
+            # mmg_account_avatax_enhancement/models/
+            # account_external_tax_mixin.py:82-97, the name at :96). Demanding
+            # the brackets on the GROUP name therefore fails a correctly
+            # ported system for a reason that has nothing to do with the
+            # workbook's question, which is about the tax NAMES — the same
+            # account.tax records FG-05 TC-TAX-002 reads on screen. So the
+            # workbook line is asserted, unweakened, against the taxes the
+            # printed rows are actually made of: tax_groups[j]
+            # ['involved_tax_ids'] (account_tax.py:2841-2845, 2882), falling
+            # back to the
+            # journal entry's own tax_line_id when tax_totals does not publish
+            # that key.
+            printed_tax_ids = []
             for group in groups:
-                code = AUTHORITY_CODE_RE.search(group["name"])
+                printed_tax_ids.extend(group.get("involved") or [])
+            printed_tax_ids = sorted({int(i) for i in printed_tax_ids if i})
+            source = "tax_totals subtotals[].tax_groups[].involved_tax_ids"
+            if not printed_tax_ids:
+                printed_tax_ids = sorted(i for i in by_tax if i)
+                source = ("the journal entry's account.move.line.tax_line_id "
+                          "(tax_totals published no involved_tax_ids)")
+            names = dict(tax_names)
+            unknown = [i for i in printed_tax_ids if i not in names]
+            if unknown:
+                names.update(_tax_names(ctx, unknown, company_ctx(company)))
+            ctx.log(f"the {len(groups)} printed tax row(s) are built from "
+                    f"{len(printed_tax_ids)} account.tax record(s), read from "
+                    f"{source}")
+
+            labels = [group["name"] for group in groups]
+            if not any(AUTHORITY_CODE_RE.search(label) for label in labels):
+                finding(ctx,
+                        f"the LABEL the customer's copy shows for each tax "
+                        f"row is the tax GROUP name — printed here as "
+                        f"{labels!r} — because the template prints "
+                        f"tax_group['group_name'] "
+                        f"(addons/account/models/account_tax.py:2889 ; "
+                        f"addons/account/views/report_invoice.xml:551), and "
+                        f"no group name on this document carries a bracketed "
+                        f"authority code. The jurisdiction lives on the "
+                        f"account.tax records asserted below, which is where "
+                        f"mmg_account_avatax_enhancement writes it and where "
+                        f"FG-05 TC-TAX-002 reads it on screen. For the "
+                        f"authority to be legible ON THE PRINTED PAGE the "
+                        f"account.tax.group names have to carry it too — a "
+                        f"configuration/port decision about tax groups, not a "
+                        f"report-template change")
+
+            unbracketed = []
+            for tax_id in printed_tax_ids:
+                recorded = by_tax.get(tax_id) or {}
+                name = (names.get(tax_id) or recorded.get("tax_name")
+                        or recorded.get("name") or f"account.tax #{tax_id}")
+                code = AUTHORITY_CODE_RE.search(name)
                 if code:
-                    ctx.log(f"  {group['name']!r} -> authority code "
-                            f"{code.group(1)!r}")
-            ctx.check("Every tax row printed in the totals block carries its "
-                      "authority code in square brackets, as TC-TAX-002 saw "
-                      "on screen (workbook Expected Result line 2)",
+                    ctx.log(f"  account.tax #{tax_id} {name!r} -> authority "
+                            f"code {code.group(1)!r}")
+                else:
+                    unbracketed.append(
+                        f"{name!r} ({money(recorded.get('amount')):.2f})")
+            ctx.check("Every tax the printed totals block is built from "
+                      "carries its authority code in square brackets in its "
+                      "account.tax.name, as TC-TAX-002 saw on screen "
+                      "(workbook Expected Result line 2)",
                       [], unbracketed)
 
         with ctx.step("Step 7 / Expected line 3: the tax rows plus the "

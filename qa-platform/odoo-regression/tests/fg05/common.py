@@ -47,12 +47,20 @@ Safety properties this suite keeps
 * TC-TAX-014 and TC-TAX-017 mutate a setting by design (a product category's
   AvaTax code, the API key). Both restore it in a ``finally:`` block, and
   both record the restore as an assertion so a failed restore is visible.
+* Every fixture product resolves an Avalara Tax Code, because a line that
+  resolves none is refused before the request leaves Odoo — see
+  :func:`fg05_product_category`. The category that supplies it is created
+  from the codes already on the target database, is ``FG05``-marked, and is
+  swept with the rest of the fixtures.
 """
 from __future__ import annotations
 
+import json
 import re
+import urllib.request
 
 from adapters.base import OdooRPCError
+from framework.fg_common import http_session
 
 # --------------------------------------------------------------- identity
 FEATURE = "FG-05 Tax Computation — Avalara AvaTax"
@@ -133,6 +141,53 @@ JURISDICTION_TAX_NAME_RE = re.compile(
     r"^.+\s\[[^\[\]]+\]\s\((?:\$\s)?-?\d+(?:\.\d+)?(?:\s%)?\)$")
 
 AUTHORITY_CODE_RE = re.compile(r"\[([^\[\]]+)\]")
+
+
+# ------------------------------------------------------- Avalara tax codes
+# Every line account_avatax sends carries a ``taxCode``, resolved by
+# ``product.product._get_avatax_category_id()`` — the product's own code, else
+# the template's, else ``product.category``'s walking ``parent_id`` upward
+# (account_avatax/models/product.py:29-57). A line that resolves nothing makes
+# ``_prepare_avatax_document_line_service_call`` raise "The Avalara Tax Code
+# is required for <product> (#<id>) / See https://taxcode.avatax.avalara.com/"
+# BEFORE the HTTP call (account_avatax/models/
+# account_external_tax_mixin.py:86-95), so the document never reaches Avalara
+# and no FG-05 expectation can be evaluated. The target database's default
+# product category carries no code, which is why every FG05 fixture product is
+# created inside ONE FG05-marked product category that does — see
+# :func:`fg05_product_category`.
+AVATAX_CATEGORY_MODEL = "product.avatax.category"
+
+# Avalara's general "tangible personal property" code — the catch-all a
+# gallery's art items map to, and the same code TC-TAX-014 / TC-TAX-016 prefer
+# for the taxable side of their pair. It ships with account_avatax
+# (data/product.avatax.category.csv, 3,483 codes). It is a PREFERENCE, never a
+# requirement: :func:`pick_default_avatax_category` falls back to the lowest id
+# on the database, so nothing here depends on one code string existing.
+DEFAULT_AVATAX_CODE = "P0000000"
+
+# Label of the single shared FG05 product category. ``make_product_category``
+# prefixes the marker, so ``sweep_fg05`` removes it like every other fixture.
+DEFAULT_CATEGORY_LABEL = "Default Taxable Goods"
+
+NO_AVATAX_CATEGORY_MODEL = (
+    "the model product.avatax.category does not exist on this database "
+    "(Odoo Enterprise 'account_avatax' is not installed), so no fixture "
+    "product can carry an Avalara Tax Code and no FG-05 expectation can be "
+    "evaluated"
+)
+
+NO_AVATAX_CATEGORY_DATA = (
+    "no product.avatax.category record exists on this database, so no FG05 "
+    "fixture product can be given an Avalara Tax Code and account_avatax "
+    "refuses every document before it reaches Avalara ('The Avalara Tax Code "
+    "is required for ...', account_avatax/models/"
+    "account_external_tax_mixin.py:86-95). The module's own data file "
+    "(account_avatax/data/product.avatax.category.csv, 3,483 codes) has not "
+    "loaded: upgrade or reinstall Odoo Enterprise 'account_avatax' on the "
+    "target database and re-run. This is a data-setup gap in the target "
+    "database — a regression test may not invent a tax code around it"
+)
 
 
 # ------------------------------------------------------------------- gates
@@ -425,24 +480,36 @@ def make_product(ctx, label: str, price: float, *, categ_id=None) -> int:
 
     Odoo-side taxes are cleared so the only tax on a document is the one
     Avalara returns — which is what every FG-05 expectation is about.
+
+    The product is filed under the shared FG05 AvaTax product category
+    (:func:`fg05_product_category`) unless the caller supplies ``categ_id``.
+    Without it the fixture would inherit the database's default product
+    category, which carries no ``avatax_category_id``, and account_avatax
+    would refuse the document with "The Avalara Tax Code is required for ..."
+    before the request left Odoo (account_avatax/models/
+    account_external_tax_mixin.py:86-95) — every FG-05 expectation about the
+    computed tax would then be unevaluable. TC-TAX-014 and TC-TAX-016 build
+    their own category, because the code ON that category is the thing those
+    two cases are testing, and they keep passing it here.
     """
     rpc = ctx.adapter.rpc
+    if categ_id is None:
+        categ_id = fg05_product_category(ctx)
     values = {
         "name": f"{MARK} {label}",
         "default_code": f"{MARK}-{label.upper().replace(' ', '-')}",
         "list_price": price,
         "sale_ok": True,
         "taxes_id": [(6, 0, [])],
+        "categ_id": categ_id,
     }
     values.update(ctx.adapter.storable_product_values())
-    if categ_id:
-        values["categ_id"] = categ_id
     tmpl_id = rpc.create("product.template", values)
     variant = rpc.search_read("product.product",
                               [("product_tmpl_id", "=", tmpl_id)],
                               ["id"], limit=1)
     ctx.log(f"fixture product #{variant[0]['id']} {values['name']!r} "
-            f"@ {price}")
+            f"@ {price} in product.category #{categ_id}")
     return variant[0]["id"]
 
 
@@ -452,6 +519,82 @@ def make_product_category(ctx, label: str, avatax_category_id=None) -> int:
     if avatax_category_id is not None:
         values["avatax_category_id"] = avatax_category_id
     return rpc.create("product.category", values)
+
+
+def _m2o(value):
+    """``[id, display_name]`` -> id; ``False`` / ``None`` / ``[]`` -> ``None``."""
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value or None
+
+
+def pick_default_avatax_category(ctx) -> dict:
+    """The ``product.avatax.category`` the FG05 fixture products map to.
+
+    Chosen from what the TARGET DATABASE actually holds, never from a
+    hard-coded code that has to exist: the general tangible-personal-property
+    code (:data:`DEFAULT_AVATAX_CODE`) when it is loaded, otherwise the lowest
+    id. Both branches are deterministic, so repeated runs against the same
+    database send the same ``taxCode`` and the tax figures stay repeatable.
+
+    Returns the row plus ``preferred`` — True when the general code was found,
+    so callers can say in evidence WHICH code they used and why. Blocks when
+    the database holds no code at all: that is a data-setup gap, and inventing
+    a ``product.avatax.category`` row would be fabricating tax configuration.
+    """
+    rpc = ctx.adapter.rpc
+    if not rpc.model_exists(AVATAX_CATEGORY_MODEL):
+        ctx.blocked(NO_AVATAX_CATEGORY_MODEL)
+    preferred = rpc.search_read(AVATAX_CATEGORY_MODEL,
+                                [("code", "=", DEFAULT_AVATAX_CODE)],
+                                ["code", "description"], limit=1, order="id")
+    rows = preferred or rpc.search_read(AVATAX_CATEGORY_MODEL, [],
+                                        ["code", "description"],
+                                        limit=1, order="id")
+    if not rows:
+        ctx.blocked(NO_AVATAX_CATEGORY_DATA)
+    chosen = dict(rows[0])
+    chosen["preferred"] = bool(preferred)
+    return chosen
+
+
+def fg05_product_category(ctx) -> int:
+    """Find-or-create the ONE FG05 product category carrying an AvaTax code.
+
+    Find-or-create rather than create: :func:`sweep_fg05` removes it between
+    tests, and the two products a single test may build have to land in the
+    same category. An existing FG05 category whose ``avatax_category_id`` was
+    somehow cleared is repaired rather than duplicated.
+
+    The category is ``FG05``-marked through :func:`make_product_category`, so
+    it is swept exactly like every other fixture and no business product
+    category is read, written or relied upon.
+    """
+    rpc = ctx.adapter.rpc
+    name = f"{MARK} {DEFAULT_CATEGORY_LABEL}"
+    existing = rpc.search_read("product.category", [("name", "=", name)],
+                               ["avatax_category_id"], limit=1, order="id")
+    if existing and _m2o(existing[0].get("avatax_category_id")):
+        return existing[0]["id"]
+
+    chosen = pick_default_avatax_category(ctx)
+    if existing:
+        categ_id = existing[0]["id"]
+        rpc.write("product.category", [categ_id],
+                  {"avatax_category_id": chosen["id"]})
+    else:
+        categ_id = make_product_category(ctx, DEFAULT_CATEGORY_LABEL,
+                                         avatax_category_id=chosen["id"])
+    why = ("the general tangible-personal-property code"
+           if chosen["preferred"]
+           else f"the lowest id on this database — {DEFAULT_AVATAX_CODE} is "
+                f"not loaded here")
+    ctx.log(f"FG05 fixture product category #{categ_id} {name!r} carries "
+            f"product.avatax.category #{chosen['id']} [{chosen['code']}] "
+            f"{chosen.get('description') or ''} ({why}); every FG05 fixture "
+            f"product resolves its Avalara Tax Code from here unless its own "
+            f"case supplies a category")
+    return categ_id
 
 
 def make_invoice(ctx, partner_id: int, lines, *, fiscal_position_id,
@@ -568,6 +711,58 @@ def account_code(ctx, account_id) -> str:
     return data[0]["code"] if data else ""
 
 
+# ------------------------------------------------------ untruncated errors
+def server_error_message(ctx, model: str, method: str, *args) -> str:
+    """Repeat one model call over a raw web session and return the FULL error.
+
+    ``adapters.base.OdooRPC.call`` reports only
+    ``str(message).strip().splitlines()[-1]`` of a server error
+    (adapters/base.py:156), so every multi-line Odoo message reaches a test
+    with all but its last line already gone. Two FG-05 expectations are ABOUT
+    the text of such a message — TC-TAX-007's address guard (a two-line
+    ``ValidationError`` whose first line names the rule) and TC-TAX-017's
+    step-6 readability check (``_handle_response`` returns
+    "<Odoo title>\\n<Avalara detail>",
+    account_avatax/models/account_external_tax_mixin.py:287-295) — and both
+    must judge what the SERVER produced, not what the transport left of it.
+
+    The identical ``/web/dataset/call_kw`` POST is therefore re-issued through
+    ``framework.fg_common.http_session`` (a public framework helper; nothing
+    in ``framework/`` is modified) and ``error.data.message`` is read
+    untouched.
+
+    Callers must only use this on a call that ALREADY failed: the failing
+    transaction was rolled back, so the repeat writes nothing, but a repeat of
+    a call that succeeded would be a second real document.
+
+    Returns ``""`` when the repeat unexpectedly succeeds or when the raw read
+    is not possible — the caller then falls back to the adapter's truncated
+    message.
+    """
+    payload = json.dumps({
+        "jsonrpc": "2.0", "method": "call", "id": 1,
+        "params": {"model": model, "method": method,
+                   "args": list(args), "kwargs": {}},
+    }, default=str).encode()
+    request = urllib.request.Request(
+        f"{ctx.env.base_url}/web/dataset/call_kw", data=payload,
+        headers={"Content-Type": "application/json"})
+    try:
+        opener = http_session(ctx.env)
+        with opener.open(request, timeout=900) as response:
+            reply = json.load(response)
+    except (OSError, ValueError, RuntimeError) as exc:
+        ctx.log(f"[evidence] could not re-read the untruncated server error "
+                f"for {model}.{method}: {exc} — falling back to the adapter's "
+                f"last-line-only message")
+        return ""
+    error = reply.get("error")
+    if not error:
+        return ""
+    data = error.get("data") or {}
+    return str(data.get("message") or error.get("message") or "").strip()
+
+
 # ----------------------------------------------------------------- sweeping
 def sweep_fg05(ctx):
     """Remove leftovers from previous FG-05 runs — marker-scoped only.
@@ -576,6 +771,10 @@ def sweep_fg05(ctx):
     workbook itself says to leave posted sandbox documents in place. Every
     assertion in the suite is therefore scoped to ids captured in-test, never
     to a count of all FG05 records.
+
+    The shared FG05 AvaTax product category (:func:`fg05_product_category`) is
+    marker-named like every other fixture and is removed here with them, after
+    the products that sit in it; the next test that needs it re-creates it.
 
     SAFETY — deleting an AvaTax invoice calls Avalara.
     ``account_external_tax/models/account_move.py::unlink`` runs
