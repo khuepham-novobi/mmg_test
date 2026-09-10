@@ -100,6 +100,7 @@ from tests.fg06.common import (CUSTOMER_SIDE, MODULE, MODULE_SALE,
                                make_partner, make_product, money, move_lines,
                                open_make_deposit_wizard, outstanding_credits,
                                payment_row, require_sale_deposit,
+                               restore_uninvoiced_order,
                                run_make_deposit_wizard, sweep_fg06, trace,
                                validate_deposit_popup)
 
@@ -113,12 +114,29 @@ def _part_paid_invoice(ctx, company, account, label: str) -> dict:
 
     Returns the ids and the figures, and asserts the starting state so a
     later failure cannot be blamed on a fixture that was never right.
+
+    MMG AUTO-INVOICE — why the order is put back before it is invoiced
+    ------------------------------------------------------------------
+    This fixture has to raise the invoice FROM THE ORDER, because that is
+    what makes posting it apply the order's deposits
+    (``sale_partner_deposit/models/account_move.py:7-17``) and so produces
+    the 7,000.00-due starting state both cases assert.
+    ``mmg_sale_auto_create_invoice`` overrides ``action_confirm`` to invoice
+    the order in full the moment it is confirmed, and the flag is ON for the
+    acting company on the MMG v19 database, so ``invoice_from_order`` found
+    nothing left to invoice and ``create_invoices()`` raised *"Cannot create
+    an invoice. No items are available to invoice"*
+    (``addons/sale/models/sale_order.py:1615-1616``). The DRAFT invoice
+    ``action_confirm`` raised is therefore removed first, restoring the
+    workbook's precondition; a posted one is never touched and BLOCKS the
+    case instead (:func:`~tests.fg06.common.restore_uninvoiced_order`).
     """
     partner_id = make_partner(ctx, f"{label} Customer", company=company,
                               customer_deposit_account_id=account["id"])
     product_id = make_product(ctx, f"{label} Art Item", ORDER_TOTAL)
     order_id = make_order(ctx, partner_id, [(product_id, 1, ORDER_TOTAL)],
                           confirm=True)
+    restore_uninvoiced_order(ctx, order_id, company)
 
     wizard_action = open_make_deposit_wizard(ctx, order_id)
     payment_action = run_make_deposit_wizard(

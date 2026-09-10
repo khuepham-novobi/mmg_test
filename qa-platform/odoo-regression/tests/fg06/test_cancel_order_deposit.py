@@ -66,20 +66,54 @@ with a 2,000.00 deposit and no invoice yet".
 ``AUTOMATION_CONVENTIONS`` rule 5 forbids depending on another test's
 records, so this case builds the same starting state itself: an 8,000.00
 order carrying a 2,000.00 deposit, taken as 25 per cent exactly as TC-DEP-005
-does, with no invoice raised.
+does.
+
+Documented adaptation — the workbook's "no invoice yet"
+--------------------------------------------------------
+``mmg_sale_auto_create_invoice`` overrides ``sale.order.action_confirm`` to
+call ``_create_invoices()`` on every order whose company carries
+``auto_create_invoice_after_confirming_so`` (``models/sale_order.py``), and
+that flag is ON for the acting company on the MMG v19 database. Confirming
+the fixture order therefore raises a DRAFT invoice at once, and asserting
+``invoice_ids == []`` unconditionally reported that MMG feature as a deposit
+defect ("expected [], got [112020]") — the same mistake already corrected on
+TC-DEP-004/005/012/016.
+
+The precondition now branches on the flag, which is the TC-DEP-005/012/016
+route rather than TC-DEP-004's deliberate restore. The workbook row decides
+it: TC-DEP-013's four Expected Result lines are that the order cancels, the
+deposit still exists and is still confirmed, it is offered on a **new**
+invoice and applies, and that new invoice ends fully paid with 500.00
+unused. Not one of them reads the order's invoices or ``invoice_status``,
+and ``action_make_a_deposit`` has no invoice gate of its own
+(``sale_partner_deposit/models/sale_order.py``), so the 2,000.00 deposit is
+taken and confirmed exactly as the workbook describes either way.
+
+Nor can the auto-created invoice consume the deposit before step 6 reads it:
+deposits are applied by ``account.move.action_post``
+(``sale_partner_deposit/models/account_move.py:7-17``), the auto-created
+invoice is never posted here, and ``sale.order._action_cancel`` cancels the
+order's own draft invoices on its way through
+(``addons/sale/models/sale_order.py:1331-1334``). Deleting it would be an
+intervention this case does not need, so the invoice is logged as MMG
+behaviour and left alone; when the flag is off the workbook's line is
+asserted verbatim.
 """
 from __future__ import annotations
 
 from adapters.base import OdooRPCError
 from framework.registry import test_case
-from tests.fg06.common import (CUSTOMER_SIDE, MODULE_SALE, OPTION_PERCENTAGE,
+from tests.fg06.common import (AUTO_INVOICE_FIELD, CUSTOMER_SIDE,
+                               MODULE_AUTO_INVOICE, MODULE_SALE,
+                               OPTION_PERCENTAGE,
                                PAYMENT_LIVE_STATES, PAYMENT_STATE_PAID,
                                WORKFLOW, WORKFLOW_NAME, acting_company,
                                apply_outstanding_credit, cleanup,
                                deposit_accounts_for_test, deposit_popup_state,
                                invoice_totals, make_invoice, make_order,
                                make_partner, make_product, money,
-                               open_make_deposit_wizard, order_totals,
+                               open_make_deposit_wizard, order_invoice_rows,
+                               order_totals,
                                outstanding_credits, payment_row,
                                require_sale_deposit, run_make_deposit_wizard,
                                sweep_fg06, trace, validate_deposit_popup)
@@ -145,8 +179,28 @@ def test_dep_013(ctx):
                        bool(deposit_id) and not error,
                        actual_desc=error or f"deposit #{deposit_id}")
         starting = order_totals(ctx, order_id)
-        ctx.check("The order has no invoice yet (workbook precondition)", [],
-                  starting["invoice_ids"])
+        # MMG auto-invoice — see the module docstring, "Documented
+        # adaptation — the workbook's 'no invoice yet'". The flag is a
+        # company setting, so the branch reports the MMG feature when it is
+        # on and asserts the workbook's line verbatim when it is off.
+        if company.get("auto_invoice_on_confirm"):
+            raised = [(r["name"], r["state"])
+                      for r in order_invoice_rows(ctx, order_id)]
+            ctx.log(
+                f"the acting company has {AUTO_INVOICE_FIELD} = True, so "
+                f"confirming this order auto-created {raised} and "
+                f"invoice_status reads {starting['invoice_status']!r}. That "
+                f"is {MODULE_AUTO_INVOICE} working as designed "
+                f"(models/sale_order.py) — an MMG feature the FG-06 workbook "
+                f"does not describe, NOT a deposit defect. Nothing this case "
+                f"asserts depends on the order being uninvoiced, and "
+                f"sale.order._action_cancel cancels the order's own draft "
+                f"invoices on the way through "
+                f"(addons/sale/models/sale_order.py:1331-1334), so the "
+                f"deposit reaches step 6 wholly unused either way.")
+        else:
+            ctx.check("The order has no invoice yet (workbook precondition)",
+                      [], starting["invoice_ids"])
 
     try:
         with ctx.step("Step 1: Total Deposit reads 2,000.00 and the Deposits "

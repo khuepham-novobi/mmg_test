@@ -78,6 +78,31 @@ regression guard — the port dropped the dead ``position`` and ``digits`` keys
 and added ``move_ref`` — and a missing key means a panel that renders wrongly
 or not at all.
 
+MMG auto-invoice and workbook step 1
+------------------------------------
+TC-DEP-007's step 1 is *Create Invoice > Regular invoice*, so the order has
+to reach it with its quantity still invoiceable.
+``mmg_sale_auto_create_invoice`` overrides ``sale.order.action_confirm`` to
+call ``_create_invoices()`` on every order whose company carries
+``auto_create_invoice_after_confirming_so``, and that flag is ON for the
+acting company on the MMG v19 database. Confirming the fixture order
+therefore invoices it in full at once; ``qty_to_invoice`` counts that draft
+invoice, ``_get_invoiceable_lines`` returns nothing, and the wizard's
+``create_invoices()`` raises *"Cannot create an invoice. No items are
+available to invoice"* (``addons/sale/models/sale_order.py:1615-1616``) —
+which is the error this case reported.
+
+The message's own advice ("change the 'Invoicing Policy' to 'Prepaid/Fixed
+Price'") is a red herring here: with a delivered-quantities product
+``action_confirm`` itself would have raised, because it invoices the order
+unconditionally. It did not — it produced the invoice. The cause is the
+auto-invoice, and the fix is
+:func:`~tests.fg06.common.restore_uninvoiced_order`, which removes the
+DRAFT invoice ``action_confirm`` raised and so restores the workbook's own
+precondition (TC-DEP-004's end state: a confirmed order carrying a deposit
+and no invoice yet). Nothing is asserted differently, and a posted invoice
+is never touched — the case BLOCKS on one instead.
+
 TC-DEP-009 and BC-016
 ---------------------
 The workbook's step 5 says to create a second deposit and *"SAVE it and leave
@@ -105,7 +130,8 @@ from tests.fg06.common import (CUSTOMER_SIDE, MODULE, MODULE_SALE,
                                make_order, make_partner, make_product, money,
                                move_lines, open_make_deposit_wizard,
                                order_totals, payment_row, require_sale_deposit,
-                               require_v19, run_make_deposit_wizard,
+                               require_v19, restore_uninvoiced_order,
+                               run_make_deposit_wizard,
                                outstanding_credits, sweep_fg06, trace,
                                validate_deposit_popup)
 
@@ -186,6 +212,10 @@ def test_dep_007(ctx):
         order_id = make_order(ctx, partner_id, [(product_id, 1, ORDER_TOTAL)],
                               confirm=True)
         created["sale.order"].append(order_id)
+        # Step 1 below IS "Create Invoice > Regular invoice", so this case
+        # needs the order's quantity still to be invoiceable. See the module
+        # docstring, "MMG auto-invoice and workbook step 1".
+        restore_uninvoiced_order(ctx, order_id, company)
 
         wizard_action = open_make_deposit_wizard(ctx, order_id)
         payment_action = run_make_deposit_wizard(

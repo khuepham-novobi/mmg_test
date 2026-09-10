@@ -101,6 +101,37 @@ indicate a real defect is dropped: a journal of any other type in that list
 would mean the module or the data broke the computation, and that still
 FAILS.
 
+Documented correction — how the bank/cash line is found
+-------------------------------------------------------
+Expected Result line 5 says "one line on the bank/cash account". This module
+used to find it with ``account_type in ('asset_cash',
+'liability_credit_card')``, and that reported a **correct** entry as a P0
+product defect ("Exactly one line on the bank/cash side: expected 1, got 0").
+The entry was well formed all along — the neighbouring Deposit Account check
+passed on the same entry — and the filter was simply looking in the wrong
+place:
+
+* an UNRECONCILED ``account.payment`` books its liquidity line to the
+  OUTSTANDING account, not to the journal's bank account.
+  ``_prepare_move_liquidity_lines`` sets that line's ``account_id`` to
+  ``self.outstanding_account_id``
+  (``addons/account/models/account_payment.py:293``);
+* Odoo classifies a line as liquidity by MEMBERSHIP of
+  ``_get_valid_liquidity_accounts()`` — the journal's ``default_account_id``,
+  the payment method lines' ``payment_account_id`` accounts and
+  ``outstanding_account_id`` — never by ``account_type``
+  (``_seek_for_lines``, ``:216-228``, ``:242-250``);
+* on ``mmg_19`` every Outstanding Receipts / Outstanding Payments account is
+  typed ``asset_current`` while the journals' own ``default_account_id``
+  accounts are ``asset_cash``. So the old filter matched nothing.
+
+The line is now found the way Odoo finds it — by account, through
+:func:`~tests.fg06.common.payment_liquidity_account` — and both assertions
+the workbook actually makes are kept unchanged: there is exactly one such
+line (the BC-003 regression guard) and it is a debit of 2,500.00. The
+revenue check is untouched: the workbook calls a revenue hit a P0, and it
+still fails on one.
+
 A coverage note — ``res.partner.total_deposit``
 -----------------------------------------------
 The contact-side reading of a deposit is asserted here too, at the end of the
@@ -119,7 +150,8 @@ from tests.fg06.common import (CUSTOMER_SIDE, DEPOSIT_ACCOUNT_FIELD, MODULE,
                                field_attrs, fields_present,
                                form_defaults, m2o_id,
                                make_deposit, make_partner, money, move_lines,
-                               onchange_values, payment_row, require_v19,
+                               onchange_values, payment_liquidity_account,
+                               payment_row, require_v19,
                                residual_manual_step, sweep_fg06, trace,
                                x2m_ids)
 
@@ -142,7 +174,9 @@ V19_JOURNAL_TYPES = {"bank", "cash", "credit"}
 
 # Account types that would mean the money landed in the wrong place.
 REVENUE_TYPES = ("income", "income_other")
-LIQUIDITY_TYPES = ("asset_cash", "liability_credit_card")
+# There is deliberately no LIQUIDITY_TYPES here. The liquidity line is found
+# by ACCOUNT, not by account_type — see the module docstring and
+# common.payment_liquidity_account.
 
 
 @test_case(
@@ -414,8 +448,15 @@ def test_dep_001(ctx):
                         f"credit={line['credit']:.2f}")
             deposit_lines = [ln for ln in lines
                              if ln["account_id"] == account["id"]]
+            # The liquidity line is identified the way Odoo identifies it —
+            # by ACCOUNT, not by account_type. See the module docstring
+            # ("Documented correction — how the bank/cash line is found").
+            liquidity = payment_liquidity_account(ctx, deposit_id)
+            ctx.log(f"the bank/cash side is looked for on account "
+                    f"#{liquidity['account_id']} — {liquidity['source']}")
             liquidity_lines = [ln for ln in lines
-                               if ln["account_type"] in LIQUIDITY_TYPES]
+                               if liquidity["account_id"]
+                               and ln["account_id"] == liquidity["account_id"]]
             revenue_lines = [ln for ln in lines
                              if ln["account_type"] in REVENUE_TYPES]
 
@@ -429,7 +470,9 @@ def test_dep_001(ctx):
                       "(customer money held as a liability)",
                       (0.0, DEPOSIT_AMOUNT),
                       (deposit_lines[0]["debit"], deposit_lines[0]["credit"]))
-            ctx.check("Exactly one line on the bank/cash side", 1,
+            ctx.check(f"Exactly one line on the bank/cash side (the "
+                      f"payment's own liquidity account "
+                      f"#{liquidity['account_id']})", 1,
                       len(liquidity_lines))
             ctx.check("The bank/cash line is a debit of 2,500.00",
                       (DEPOSIT_AMOUNT, 0.0),

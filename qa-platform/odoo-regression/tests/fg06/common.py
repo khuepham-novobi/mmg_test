@@ -1090,6 +1090,76 @@ def drop_draft_order_invoices(ctx, order_id: int) -> tuple[list, list]:
     return removed, kept
 
 
+def restore_uninvoiced_order(ctx, order_id: int, company: dict) -> list[dict]:
+    """Give a just-confirmed FG06 order back its INVOICEABLE quantity.
+
+    For the cases whose own workbook step is *Create Invoice > Regular
+    invoice*. ``mmg_sale_auto_create_invoice`` raises a draft invoice for
+    the whole order inside ``action_confirm`` whenever the acting company
+    carries :data:`AUTO_INVOICE_FIELD` (``models/sale_order.py``), and that
+    flag is ON for the acting company on the MMG v19 database. Every line is
+    then already invoiced — ``sale.order.line.qty_to_invoice`` counts draft
+    invoices too — so ``_get_invoiceable_lines`` returns nothing and the
+    wizard's ``create_invoices()`` raises *"Cannot create an invoice. No
+    items are available to invoice … change the 'Invoicing Policy' to
+    'Prepaid/Fixed Price'"* (``addons/sale/models/sale_order.py:1615-1616``,
+    message at ``:1485-1493``). The message names the invoicing policy, but
+    the policy is not the cause here: with a delivered-quantities product
+    ``action_confirm`` itself would have raised, and it did not — it
+    produced the invoice.
+
+    So the auto-created DRAFT invoice is removed before the case performs
+    its own step, exactly as TC-DEP-004 does
+    (``test_order_deposit.py._require_confirmed_uninvoiced(restore=True)``).
+    This restores the workbook's stated precondition — "a confirmed order
+    with no invoice yet" — and is never a way to make an assertion pass.
+
+    A POSTED invoice is never touched: the case BLOCKS instead, because the
+    workbook describes no such starting state and inventing one would put a
+    fabricated verdict in the report. Returns the rows removed (empty when
+    the flag is off or nothing was auto-created).
+    """
+    if not company.get("auto_invoice_on_confirm"):
+        return []
+    raised = order_invoice_rows(ctx, order_id)
+    if not raised:
+        return []
+    ctx.log(f"the acting company has {AUTO_INVOICE_FIELD} = True, so "
+            f"confirming order #{order_id} auto-created "
+            f"{[(r['name'], r['state']) for r in raised]}. That is "
+            f"{MODULE_AUTO_INVOICE} working as designed — an MMG feature "
+            f"the FG-06 workbook does not describe, NOT a deposit defect. "
+            f"This case's own step is 'Create Invoice > Regular invoice', "
+            f"which needs the order's quantity still to be invoiceable, so "
+            f"the auto-created draft is removed to restore the workbook's "
+            f"precondition.")
+    removed, kept = drop_draft_order_invoices(ctx, order_id)
+    status = ctx.adapter.rpc.read(
+        "sale.order", [order_id], ["invoice_status"])[0].get(
+            "invoice_status") or ""
+    # ``invoice_status`` is the whole gate: it reads 'invoiced' only while
+    # every line is still fully invoiced, and a CANCELLED move releases its
+    # quantity again — ``_prepare_qty_invoiced`` counts an invoice line only
+    # while ``move_id.state != 'cancel'``
+    # (addons/sale/models/sale_order_line.py:1007-1017). So a leftover row in
+    # ``kept`` is reported but does not by itself block the case.
+    if status == "invoiced":
+        ctx.blocked(
+            f"this case's workbook step is 'Create Invoice > Regular "
+            f"invoice' and the order cannot be returned to the CONFIRMED, "
+            f"UNINVOICED state that step needs: {AUTO_INVOICE_FIELD} is ON "
+            f"for the acting company, and after removing "
+            f"{[r['name'] for r in removed] or 'nothing'} the order still "
+            f"reads invoice_status={status!r} with "
+            f"{[(r['name'], r['state']) for r in kept]} attached. Posted "
+            f"invoices are deliberately left alone "
+            f"(AUTOMATION_CONVENTIONS rule 3)")
+    ctx.log(f"order #{order_id} is invoiceable again "
+            f"(invoice_status={status!r}) after removing "
+            f"{[r['name'] for r in removed]}")
+    return removed
+
+
 def make_deposit(ctx, partner_id: int, amount: float, *, account_id: int,
                  side: str = CUSTOMER_SIDE, sale_deposit_id=None,
                  date=None, currency_id=None, journal_id=None,
@@ -1352,6 +1422,63 @@ def payment_row(ctx, payment_id: int) -> dict:
             row.get("property_account_vendor_deposit_id")),
         "sale_deposit_id": m2o_id(row.get("sale_deposit_id")),
         "deposit_ids": row.get("deposit_ids") or [],
+    }
+
+
+def payment_liquidity_account(ctx, payment_id: int) -> dict:
+    """The account a payment books its LIQUIDITY line to — Odoo's own rule.
+
+    NOT an ``account_type`` test, and this is the reason why.
+
+    ``_prepare_move_liquidity_lines`` writes that line to
+    ``self.outstanding_account_id``
+    (``addons/account/models/account_payment.py:293``), and
+    ``_seek_for_lines`` classifies a line as liquidity by membership of
+    ``_get_valid_liquidity_accounts()`` — ``journal_id.default_account_id |
+    payment_method_line_id.payment_account_id | the journal's inbound and
+    outbound method-line payment accounts | outstanding_account_id``
+    (``:216-228``, ``:242-250``) — never by ``account_type``. An
+    unreconciled deposit therefore sits on the Outstanding Receipts /
+    Outstanding Payments account, not on the journal's bank account, and on
+    ``mmg_19`` EVERY such outstanding account is typed ``asset_current``
+    while the journals' ``default_account_id`` accounts are ``asset_cash``.
+    Filtering the entry's lines on ``account_type in ('asset_cash',
+    'liability_credit_card')`` consequently matched NOTHING on a perfectly
+    well-formed entry and reported it as a product defect.
+
+    ``outstanding_account_id`` is ``store=True, compute=
+    '_compute_outstanding_account_id'`` in v19 (``:123-129``, computed from
+    ``payment_method_line_id.payment_account_id`` at ``:621-623``), so it is
+    readable over RPC. It falls back to the journal's own
+    ``default_account_id`` — also a member of
+    ``_get_valid_liquidity_accounts()`` — when the payment method line
+    carries no payment account and the field is therefore empty.
+
+    Returns ``{"account_id", "source"}``; ``account_id`` is ``None`` when
+    neither is set, which the caller reports rather than hides.
+    """
+    rpc = ctx.adapter.rpc
+    row = rpc.read("account.payment", [payment_id],
+                   ["outstanding_account_id", "journal_id"])[0]
+    outstanding_id = m2o_id(row.get("outstanding_account_id"))
+    if outstanding_id:
+        return {"account_id": outstanding_id,
+                "source": f"account.payment.outstanding_account_id "
+                          f"({m2o_name(row.get('outstanding_account_id'))})"}
+    journal_id = m2o_id(row.get("journal_id"))
+    if not journal_id:
+        return {"account_id": None,
+                "source": "neither outstanding_account_id nor a journal is "
+                          "set on the payment"}
+    journal = rpc.read("account.journal", [journal_id],
+                       ["name", "default_account_id"])[0]
+    default_id = m2o_id(journal.get("default_account_id"))
+    return {
+        "account_id": default_id,
+        "source": f"account.payment.outstanding_account_id is not set, so "
+                  f"the journal's own default_account_id "
+                  f"({m2o_name(journal.get('default_account_id')) or 'unset'}"
+                  f") on {journal.get('name')!r}",
     }
 
 
