@@ -453,13 +453,20 @@ def test_inv_002(ctx):
         # Without that module there is nothing here to widen, so the case is
         # BLOCKED rather than passed vacuously.
         require_module(ctx, "mmg_account", NO_MMG_INVOICE_TEMPLATE)
+        # The v15 module name, probed only to say out loud that it is ABSENT
+        # BY DESIGN. mmg_account absorbed mmg_change_invoice_template in the
+        # v19 port (decision D1, mmg_account/__manifest__.py), so on a correct
+        # staging_19 database this reads 'no such module row' and that is the
+        # right answer — nothing here gates on it.
         template_state = module_state(rpc, "mmg_change_invoice_template")
         ctx.log(f"mmg_change_invoice_template state: "
-                f"{template_state or 'no such module row'} — it forces "
-                f"display_discount to False, which removes the Disc.% column "
-                f"and therefore changes the expected table width by one. This "
-                f"case reads the width from the rendered head rather than "
-                f"assuming it, so either state is handled")
+                f"{template_state or 'no such module row'} "
+                f"(expected: absent — mmg_account absorbed it in v19, "
+                f"decision D1). It is mmg_account/report/report_invoice.xml "
+                f"that now forces display_discount to False, which removes "
+                f"the Disc.% column and therefore changes the expected table "
+                f"width by one. This case reads the width from the rendered "
+                f"head rather than assuming it, so either state is handled")
         company = acting_company(ctx)
         ctx.log(f"acting company #{company['id']} {company['name']!r} — "
                 f"company currency {company['currency_name']}")

@@ -328,6 +328,28 @@ def _line_model(line_id) -> str:
     return parts[1] if len(parts) == 3 else ""
 
 
+def _line_res_id(line_id) -> str:
+    """The GROUPING VALUE of a report line, out of the same generic id.
+
+    The last segment of ``markup~model~value`` is the record id the line was
+    grouped on — for these two reports, the ``res.partner`` id, because both
+    declare ``groupby="partner_id, id"``
+    (``enterprise-19.0/account_reports/data/aged_partner_balance.xml``). It
+    is returned as the raw string, which is ``''`` for the synthetic
+    "Unknown" line whose grouping key was NULL
+    (``account_report.py:7766``, ``:7836-7837``).
+
+    Identity, not the display name, is what the duplicate test below needs:
+    the report groups by ``partner_id``, so ONE partner physically cannot
+    produce two partner-level rows, and a repeated NAME means two DISTINCT
+    contacts are called the same thing — a contact-data finding, not a
+    report defect.
+    """
+    last = str(line_id or "").split("|")[-1]
+    parts = last.rsplit("~", 2)
+    return parts[2] if len(parts) == 3 else ""
+
+
 def _as_at_date(ctx, company: dict, baseline: dict | None = None
                 ) -> tuple[str, str]:
     """``(date, where it came from)`` — never today, so a re-run reproduces.
@@ -497,6 +519,10 @@ def _capture(ctx, key: str, cutoff: str, company: dict) -> dict:
             continue
         row = {
             "partner": str(line.get("name") or ""),
+            # The res.partner id the line was grouped on — '' on the
+            # synthetic "Unknown" row. Kept because the display name is not
+            # an identity: two different contacts can share one.
+            "partner_id": _line_res_id(line.get("id")),
             "buckets": {label: money(cell_value(line, index[label]))
                         for label in BUCKET_LABELS},
             "total": money(cell_value(line, index[TOTAL_LABEL])),
@@ -768,19 +794,49 @@ def test_dat_004(ctx):
                             f"{len(sides['aged_payable']['partners'])} "
                             f"partner row(s), as at {cutoff}")
 
+            # Counted on the res.partner ID parsed out of the report line's
+            # generic id, NEVER on the display name. Both reports group by
+            # partner_id (aged_partner_balance.xml, groupby="partner_id, id"),
+            # so one partner cannot produce two partner-level rows and a
+            # repeated NAME is a different fact entirely: two DISTINCT
+            # contacts that happen to be called the same thing. Keying on the
+            # name would report that duplicate-contacts data problem as a
+            # report defect and send the fix to the wrong place.
             duplicated = []
+            shared_names = []
             for data in sides.values():
-                seen: dict[str, int] = {}
+                seen: dict[str, int] = {}          # partner id -> row count
+                ids_by_name: dict[str, set] = {}   # display name -> ids
                 for row in data["partners"]:
-                    seen[row["partner"]] = seen.get(row["partner"], 0) + 1
+                    key = row["partner_id"]
+                    seen[key] = seen.get(key, 0) + 1
+                    ids_by_name.setdefault(row["partner"], set()).add(key)
                 duplicated.extend(
-                    f"{data['menu']}: {name!r} appears on {count} separate "
-                    f"rows" for name, count in seen.items() if count > 1)
+                    f"{data['menu']}: res.partner #{pid or '(Unknown)'} "
+                    f"appears on {count} separate rows"
+                    for pid, count in seen.items() if count > 1)
+                shared_names.extend(
+                    f"{data['menu']}: {name!r} is the display name of "
+                    f"{len(ids)} different contacts "
+                    f"(res.partner ids {sorted(ids)})"
+                    for name, ids in ids_by_name.items() if len(ids) > 1)
             # Two rows for one customer would split a balance across two
             # entries in the collections list and could hide a debt below the
             # top ten.
             ctx.check("No partner appears on more than one row of either "
                       "report", [], duplicated)
+            # A DATA finding, not a report defect: the report is doing exactly
+            # what it is asked to. It still matters, because a collections
+            # clerk reading the printed list cannot tell the two contacts
+            # apart and will chase the wrong one.
+            for note in shared_names:
+                finding(ctx, f"{note}. The aged report groups by partner_id, "
+                             f"so these are genuinely separate contacts with "
+                             f"one name and each carries its own balance — "
+                             f"the report is correct, the CONTACT DATA is "
+                             f"not. Merge or rename them in Contacts, "
+                             f"otherwise the collections list shows the same "
+                             f"name twice with two different debts")
 
             for data in sides.values():
                 if data["unknown_partner"]:

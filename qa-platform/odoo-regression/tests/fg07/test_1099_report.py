@@ -434,8 +434,8 @@ def test_inv_015(ctx):
                       "(account.account_reports_taxes_and_fiscal_menu)",
                       section["id"], entry["parent_id"])
             ctx.check_true(
-                f"The entry is active (an archived menuitem exists in "
-                f"ir.ui.menu but never appears in the Reporting tree)",
+                "The entry is active (an archived menuitem exists in "
+                "ir.ui.menu but never appears in the Reporting tree)",
                 entry["active"],
                 actual_desc=f"active={entry['active']}, sequence="
                             f"{entry['sequence']}")

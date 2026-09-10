@@ -94,7 +94,7 @@ from tests.fg08.common import (ACTION_MANAGE_STORES, ACTION_OVERVIEW,
                                STATUS_CONNECTED, STATUS_DISCONNECTED,
                                VIEW_STORE_KANBAN, VIEW_STORE_LIST,
                                VIEW_STORE_SEARCH, WORKFLOW, WORKFLOW_NAME,
-                               as_date, channel_fields, dashboard_payload,
+                               as_date, dashboard_payload,
                                find_shopify_store, finding, list_columns,
                                m2o_id, manual, observation, readonly_rpc,
                                require_connector, require_manager_group,
@@ -423,11 +423,16 @@ def test_chn_005(ctx):
                             "multichannel_order's replace "
                             "(omni_manage_channel/views/"
                             "omnichannel_dashboard_views.xml:56-60)")
-            ctx.check(
-                "The card and the list read the same Status value, because "
-                "they read the same field on the same record",
-                values.get("status"),
-                rpc.read(CHANNEL, [store_id], ["status"])[0]["status"])
+            observation(
+                ctx,
+                f"step 6's 'the card and the list agree' is a question about "
+                f"what each view binds, not a data question: the list binds "
+                f"status (asserted in its columns above) and the card binds "
+                f"status (asserted immediately above), and there is exactly "
+                f"one ecommerce.channel row behind both. Re-reading "
+                f"{CHANNEL}.status a second time would compare a value with "
+                f"itself, so it is not asserted; the value both screens show "
+                f"is {values.get('status')!r}")
 
             missing_from_card = [text for text in V15_CARD_READINGS
                                  if text not in kanban_arch]

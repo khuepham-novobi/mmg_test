@@ -1063,7 +1063,7 @@ def test_inv_014(ctx):
                 "'no error page and no blank screen' is finally a screen "
                 "judgement. This case asserted the payload behind the screen "
                 "— each report's get_report_information returned lines, and "
-                f"the figure counts were: " + "; ".join(
+                "the figure counts were: " + "; ".join(
                     f"{reports[key]['label']} {len(reports[key]['lines'])} "
                     f"line(s)/{reports[key]['figures']} figure(s)"
                     for key in REPORT_ORDER) +

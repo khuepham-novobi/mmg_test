@@ -47,11 +47,25 @@ Two things make the naive version of that comparison wrong:
 The recomputation therefore reproduces the query's own boundary expression
 — ``datetime.now().replace(hour=0, minute=0, second=0) -
 timedelta(days=delta)``, with no upper bound — against the **server's**
-clock and the store's *current* period rather than a guess. One honest
-limitation: the real boundary keeps the call's microseconds and the clock
-this suite can read is second-resolution, so the reproduced window is at
-most one second wider. The log names the boundary it used, so a
-one-order disagreement at the edge is recognisable for what it is.
+clock and the store's *current* period rather than a guess. Two honest
+limitations, both logged rather than assumed away:
+
+1. The real boundary keeps the call's microseconds and the clock this suite
+   can read is second-resolution, so the reproduced window is at most one
+   second wider. The log names the boundary it used, so a one-order
+   disagreement at the edge is recognisable for what it is.
+2. The card's boundary comes from the Odoo process's **local** clock
+   (``datetime.now()``) and the only clock this suite can read is **UTC**
+   (``res.users.login_date`` is ``res.users.log.create_date``, stamped
+   ``now() AT TIME ZONE 'UTC'``). On a non-UTC server the two differ by the
+   offset, and by a whole day of orders whenever the local and the UTC date
+   differ. Nothing this read-only suite may call reports that local clock,
+   so the offset is bounded rather than measured: the figures are compared
+   against the envelope of the three windows a real UTC offset can produce
+   (``common.window_start_candidates``). Where the three hold the same
+   orders — the normal case — the comparison is exact. A card reading
+   outside the envelope is still GATE 6's "the screen is reading somewhere
+   else"; one inside it is a timezone difference and is reported as one.
 
 FINDING — steps 4 and 5 cannot be performed on the card
 -------------------------------------------------------
@@ -90,15 +104,24 @@ Shopify whenever a credential field is in ``vals``
 
 So the expectation is proved read-only, and more thoroughly than the manual
 step: the selector's four options are asserted from ``fields_get``, its
-binding on the card from the arch, and the figures are recomputed for **all
-four** windows to show they genuinely differ — with the same GATE-6
-discrimination applied when two windows agree. The one click is recorded as
-a RESIDUAL MANUAL STEP with its reason.
+binding on the card from the arch, and the order populations behind **all
+four** windows are recomputed and asserted to differ, so a change of
+selection has figures to change.
+
+What that assertion is NOT is the workbook's Expected Result line 3. Line 3
+says *the card's* figures change, and the card's payload is produced once
+per execution, for the store's period as it stands
+(``get_dashboard_datas`` takes its window from ``kanban_dashboard_period``
+on the record). Reading the card at a second setting means writing that
+field on the live store. So the assertion is named for what it proves and
+the card-side half is a RESIDUAL MANUAL STEP with its reason — rather than
+a check that recomputes both of its own sides carrying the workbook's name.
 
 What is NOT asserted here
 -------------------------
 That the OWL components actually paint. This suite makes no browser call
-(see ``docs/FG-08_MANUAL_GUIDELINE_SUITE.md`` §7); the render itself is
+(see ``reports/data/fg08_feasibility.json``, key ``_no_browser``); the
+render itself is
 covered by the module's own ``browser_js`` test,
 ``omni_manage_channel/tests/test_dashboard_ui.py``, which runs in the Odoo
 test runner rather than this platform. Everything the render *displays* —
@@ -120,10 +143,11 @@ from tests.fg08.common import (ACTION_OVERVIEW, BASE_DASHBOARD_KEYS,
                                find_shopify_store, finding, graph_payload,
                                m2o_id, manual, number_from, observation,
                                parse_arch, readonly_rpc, require_connector,
-                               require_manager_group, require_v19,
+                               require_user_group, require_v19,
                                resolve_action, server_now, store_context,
                                store_domain, store_values, trace, view_arch,
-                               window_start, write_csv)
+                               window_start, window_start_candidates,
+                               write_csv)
 
 #: The three-dot menu's sections and the workbook's names for them
 #: (omni_manage_channel/views/omnichannel_dashboard_views.xml:98-113).
@@ -209,7 +233,7 @@ def test_chn_011(ctx):
         with ctx.step("Gate: Odoo 19 target with the e-commerce connector "
                       "stack installed"):
             require_v19(ctx)
-            require_manager_group(ctx)
+            require_user_group(ctx)
             fields_meta = require_connector(ctx)
             manual(ctx, "the workbook's preconditions are 'TC-CHN-001 has "
                         "passed' and \"you have the 'E-commerce User' group "
@@ -217,6 +241,19 @@ def test_chn_011(ctx):
                         "depending on another test's state, so this case "
                         "resolves the store itself; the registry order (802) "
                         "still runs it after the two step-2.0 cases")
+            observation(
+                ctx,
+                "this case is gated on 'E-commerce User' — the group the "
+                "workbook's own precondition names — and not on 'E-commerce "
+                "Manager' as TC-CHN-001 is. The menus say the same: the "
+                "Overview menu carries no groups of its own and hangs off a "
+                "root restricted to group_listing_user, while Manage Stores "
+                "is the menu restricted to group_listing_manager "
+                "(omni_manage_channel/views/ecommerce_channel_views.xml:"
+                "4-6, 23-24, 82-84). This case reads no group-restricted "
+                "field — it never reads the access token — so a Manager "
+                "gate here would report a correctly-provisioned E-commerce "
+                "User as BLOCKED against a screen they are entitled to open")
             ctx.check_true(
                 "The 'E-commerce User' group the workbook names exists",
                 bool(rpc.ref(GROUP_USER)),
@@ -359,15 +396,82 @@ def test_chn_011(ctx):
                     f"dated within a second of {start} is that, not a "
                     f"defect.")
 
-            card_orders = number_from(payload.get("num_of_orders"))
+            # The clock, made explicit rather than assumed. The card builds
+            # its boundary from datetime.now() — the Odoo PROCESS's local
+            # wall clock (multichannel_order/models/ecommerce_channel.py:229)
+            # — and server_now() can only read UTC (res.users.login_date is
+            # res.users.log.create_date, stamped now() AT TIME ZONE 'UTC').
+            # On a non-UTC server the two boundaries differ by the offset,
+            # and by a whole day of orders whenever the local and UTC dates
+            # differ. Comparing against one guessed boundary turns that into
+            # a false GATE-6 defect, so the card is compared against the
+            # envelope of the three windows a real UTC offset can produce.
+            tz_windows = []
+            for label, boundary, shift in window_start_candidates(now, days):
+                measured = recomputed if shift == 0 else count_and_total(
+                    ctx, channel_order_domain(store_id, boundary))
+                tz_windows.append((label, boundary, shift, measured))
+                ctx.log(f"  boundary if {label}: {boundary} -> "
+                        f"count={measured['count']} "
+                        f"total={measured['total']} "
+                        f"unshipped={measured['unshipped']}")
+
+            def _envelope(key):
+                readings = [window[key] for _l, _b, _s, window in tz_windows]
+                return min(readings), max(readings)
+
+            tz_exact = all(_envelope(key)[0] == _envelope(key)[1]
+                           for key in ("count", "total", "unshipped"))
+            if tz_exact:
+                ctx.log("the three candidate windows hold the same orders, "
+                        "so the server's timezone cannot affect this "
+                        "comparison: every figure below is asserted exactly")
+            else:
+                observation(
+                    ctx,
+                    f"the three candidate windows do NOT hold the same "
+                    f"orders (counts "
+                    f"{[w['count'] for _l, _b, _s, w in tz_windows]}), so "
+                    f"the server's UTC offset decides which one the card "
+                    f"used and this suite cannot read it — nothing it may "
+                    f"call reports the Odoo process's local clock. The "
+                    f"figures below are therefore asserted against the "
+                    f"range those windows span. A card reading INSIDE the "
+                    f"range is a timezone difference, not a defect; one "
+                    f"OUTSIDE it is still GATE 6's 'the screen is reading "
+                    f"somewhere else'. To tighten this, run the platform "
+                    f"against an Odoo server whose process clock is UTC")
+
+            def _figure_check(name, key, raw, tolerance=0.0):
+                """One card figure against the recomputation.
+
+                Exact where the three candidate windows agree and no
+                rounding tolerance applies; a range otherwise — see the
+                comment above and common.window_start_candidates.
+                """
+                parsed = number_from(raw)
+                low, high = _envelope(key)
+                if tz_exact and not tolerance:
+                    ctx.check(name, float(low),
+                              parsed if parsed is not None else raw)
+                    return
+                ctx.check_true(
+                    name,
+                    parsed is not None
+                    and (low - tolerance) <= parsed <= (high + tolerance),
+                    actual_desc=f"card={raw!r} (parsed {parsed}) vs "
+                                f"{low}–{high} across the three candidate "
+                                f"windows"
+                                + (f", tolerance {tolerance}" if tolerance
+                                   else "")
+                                + f"; clock read from {clock_source}")
+
             card_sales = number_from(payload.get("total_sales"))
-            ctx.check(
-                "The card's order count is exactly what its own query "
-                "returns — if these disagree the screen is reading "
-                "somewhere else, which is the workbook's central worry",
-                float(recomputed["count"]),
-                card_orders if card_orders is not None
-                else payload.get("num_of_orders"))
+            _figure_check(
+                "The card's order count is what its own query returns — if "
+                "these disagree the screen is reading somewhere else, which "
+                "is the workbook's central worry",
+                "count", payload.get("num_of_orders"))
             if card_sales is None:
                 observation(
                     ctx,
@@ -378,14 +482,12 @@ def test_chn_011(ctx):
                     f"is in the title attribute on screen. Recomputed "
                     f"total: {recomputed['total']}")
             else:
-                ctx.check_true(
-                    "…and so is its sales total",
-                    abs(card_sales - recomputed["total"]) <= MONEY_TOLERANCE,
-                    actual_desc=f"card={payload.get('total_sales')!r} "
-                                f"(parsed {card_sales}) vs recomputed "
-                                f"{recomputed['total']}; tolerance "
-                                f"{MONEY_TOLERANCE} because the figure is "
-                                f"formatted to whole units with dg=0")
+                _figure_check(
+                    "…and so is its sales total (tolerance "
+                    "{}, because the figure is formatted to whole units "
+                    "with dg=0)".format(MONEY_TOLERANCE),
+                    "total", payload.get("total_sales"),
+                    tolerance=MONEY_TOLERANCE)
 
             # Step 9 as the tester would do it: Sales > Orders > Orders,
             # group by Store, restricted to the same window.
@@ -475,13 +577,18 @@ def test_chn_011(ctx):
                     f"to distinguish the two: there are {any_state} channel "
                     f"order(s) of ANY state in the window, and "
                     f"{recomputed['count']} confirmed one(s) — so the zero "
-                    f"is the population, not the screen")
-                ctx.check(
-                    "GATE 6: the card does NOT read zero while confirmed "
-                    "channel orders exist in its window",
-                    0,
-                    rpc.search_count(SALE_ORDER,
-                                     channel_order_domain(store_id, start)))
+                    f"is the population, not the screen. The neighbouring "
+                    f"windows a different server timezone would have used "
+                    f"hold {[w['count'] for _l, _b, _s, w in tz_windows]} "
+                    f"confirmed order(s), so the classification does not "
+                    f"turn on the clock either. GATE 6's own assertion is "
+                    f"not repeated here: the card-versus-database "
+                    f"discrimination it asks for is the order-count check "
+                    f"above, which runs on every execution and fails if the "
+                    f"card reads a figure the database does not support. "
+                    f"Re-asserting 0 against a count over the SAME domain "
+                    f"that produced the 0 which selected this branch would "
+                    f"prove nothing")
                 manual(ctx, f"mark the workbook's figure checks N/A and say "
                             f"why, as its precondition instructs: no "
                             f"confirmed store order falls in the last "
@@ -551,31 +658,33 @@ def test_chn_011(ctx):
 
             thirty = next(r for r in period_rows if r[1] == "last_30_days")
             ninety = next(r for r in period_rows if r[1] == "last_90_days")
-            differ = (thirty[3], thirty[4]) != (ninety[3], ninety[4])
-            if differ:
-                ctx.check_true(
-                    "Changing the period from Last 30 days to Last 90 days "
-                    "changes the figures (workbook Expected Result line 3)",
-                    differ,
-                    actual_desc=f"30d: {thirty[3]} order(s) / {thirty[4]}; "
-                                f"90d: {ninety[3]} order(s) / {ninety[4]}")
-            else:
+            if (thirty[3], thirty[4]) == (ninety[3], ninety[4]):
                 observation(
                     ctx,
                     f"the 30-day and 90-day windows give the same figures "
-                    f"({thirty[3]} order(s) / {thirty[4]}), so the "
-                    f"workbook's 'the figures change' cannot be observed on "
+                    f"({thirty[3]} order(s) / {thirty[4]}), so the exact "
+                    f"switch the workbook names cannot be demonstrated on "
                     f"this data — not because the selector is broken but "
                     f"because no confirmed store order falls in the 30-90 "
                     f"day band. Every window is in "
                     f"TC-CHN-011-period-windows.csv; pick two that differ")
-                ctx.check_true(
-                    "…and the selector is nonetheless wired to the figures: "
-                    "at least two of its four windows give different "
-                    "numbers",
-                    len({(row[3], row[4]) for row in period_rows}) > 1,
-                    actual_desc=f"windows: "
-                                f"{[(r[1], r[3], r[4]) for r in period_rows]}")
+            # Named for what it proves. The workbook's Expected Result line 3
+            # ("changing the period changes the figures") has two halves: the
+            # populations really differ across the windows the selector maps,
+            # and the CARD re-reads them when the selection changes. Only the
+            # first is provable read-only — dashboard_payload() is called once
+            # per execution, for the store's current period — and the second
+            # is the residual manual step below. An assertion that recomputes
+            # both sides itself must not carry the workbook's name.
+            ctx.check_true(
+                "The four windows the period selector maps return different "
+                "order populations, so a change of selection has something "
+                "to change (the card-side half of workbook Expected Result "
+                "line 3 is the RESIDUAL MANUAL STEP below: proving it needs "
+                "a write to the live store)",
+                len({(row[3], row[4]) for row in period_rows}) > 1,
+                actual_desc=f"windows: "
+                            f"{[(r[1], r[3], r[4]) for r in period_rows]}")
 
             manual(ctx, "the one click the workbook asks for — switching "
                         "the selector on the card from Last 30 days to Last "
@@ -604,16 +713,14 @@ def test_chn_011(ctx):
                 "# Orders, # Order Unshipped and Lead Time",
                 [], missing_tiles)
 
-            ctx.check(
+            _figure_check(
                 "# Orders is the confirmed-order count for the selected "
                 "period",
-                float(recomputed["count"]),
-                number_from(payload.get("num_of_orders")))
-            ctx.check(
+                "count", payload.get("num_of_orders"))
+            _figure_check(
                 "# Order Unshipped counts the unshipped ones within that "
                 "same set",
-                float(recomputed["unshipped"]),
-                number_from(payload.get("num_of_unshipped_orders")))
+                "unshipped", payload.get("num_of_unshipped_orders"))
             observation(
                 ctx,
                 "# Order Unshipped has no domain of its own — it is a "

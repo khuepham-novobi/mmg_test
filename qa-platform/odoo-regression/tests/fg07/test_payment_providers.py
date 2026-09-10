@@ -73,8 +73,17 @@ The 3 Expected Result lines, and what each is read from
      (``addons/payment/models/payment_provider.py:537-539`` raises
      ``UserError("You cannot publish a disabled provider.")``, and
      ``:272-278`` unpublishes on every state change), so a row in that state
-     is upgrade damage: the website still offers a payment button that cannot
-     take money;
+     can only have been written by something that bypassed the form, i.e.
+     the migration. **It does not put a dead payment button on the shop.**
+     ``_get_compatible_providers`` searches ``state in ('enabled', 'test')``
+     BEFORE it filters on ``is_published``
+     (``addons/payment/models/payment_provider.py``,
+     ``_get_compatible_providers``), so a Disabled provider is never offered
+     at checkout whatever its published flag says. What it IS, is an
+     inconsistent configuration row left behind by the upgrade: the
+     back-office list and the Website > Published filter show the provider as
+     published while it is off, so nobody can read the provider list and tell
+     which providers the gallery actually meant to publish;
    * no live provider has ``code == 'none'``. ``code`` defaults to ``'none'``
      (``addons/payment/models/payment_provider.py:34-40``) and is only set to
      a real value by the provider module's OWN data file (e.g.
@@ -768,22 +777,33 @@ def test_inv_010(ctx):
                 ctx.log(f"  state={state!r} ({state_labels.get(state, '')}): "
                         f"{by_state[state]}")
 
-            # (a) A provider offered on the website while Disabled is upgrade
-            #     damage: Odoo refuses to create that combination itself.
+            # (a) Published-while-Disabled is an inconsistent configuration
+            #     row that only the migration can have written: Odoo refuses
+            #     to create that combination itself. It is NOT a live payment
+            #     button — _get_compatible_providers filters on state before
+            #     is_published, so the shop never offers a Disabled provider —
+            #     which is why the assertion is worded as a configuration
+            #     defect and not as a checkout defect.
             published_while_disabled = sorted(
                 _label(row) for row in provider_rows
                 if row["is_published"] and row["state"] == STATE_DISABLED)
             ctx.check(
-                "No provider is still published on the website while its "
-                "state is Disabled — Odoo itself refuses that combination "
-                "(action_toggle_is_published raises 'You cannot publish a "
-                "disabled provider', addons/payment/models/"
+                "No provider is left in the inconsistent state 'published on "
+                "the website while Disabled' — Odoo itself refuses that "
+                "combination (action_toggle_is_published raises 'You cannot "
+                "publish a disabled provider', addons/payment/models/"
                 "payment_provider.py:537-539; and the form's own "
                 "@api.onchange('state') at :273-279 unpublishes as soon as "
-                "the state is edited on screen — which is why only a write "
-                "that bypassed the form, i.e. the migration, can produce "
-                "this), so a row in it means the shop still shows a payment "
-                "button that cannot take money",
+                "the state is edited on screen), so only a write that "
+                "bypassed the form — i.e. the migration — can produce it. "
+                "The shop is NOT affected: _get_compatible_providers selects "
+                "on state in ('enabled','test') BEFORE filtering on "
+                "is_published, so a Disabled provider is never offered at "
+                "checkout. What a row here means is that the published flag "
+                "no longer records anything true, so the provider list can no "
+                "longer be read to see which providers the gallery meant to "
+                "publish — fix the flag before using it to decide what to "
+                "re-enable",
                 [], published_while_disabled)
 
             # (b) A live provider whose module never installed shows as

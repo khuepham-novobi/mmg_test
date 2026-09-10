@@ -47,6 +47,17 @@ The 5 Expected Result lines, and what each is read from
    ``tax_group_id`` (``:214-217``).
    ``_get_tax_totals_summary`` is PRIVATE and is never called over RPC —
    reading the field gives the identical dict.
+
+   **The count is compared on TAX GROUPS, not on taxes.** One printed row is
+   one ``tax_groups[]`` entry, i.e. one ``account.tax.group``, and several
+   taxes may legitimately share a group — so comparing the printed rows
+   against the number of distinct ``tax_line_id`` would fail a correct system
+   whose jurisdictions are grouped. The ledger-side counterpart of a printed
+   row is therefore the number of distinct
+   ``account.move.line.tax_group_id``. When the ledger holds more taxes than
+   groups, that coarseness is raised on its own as a FINDING (the fix is
+   configuration — one ``account.tax.group`` per jurisdiction — not a
+   template change), so the two questions stay separate.
 2. **"The tax names carry their bracketed authority codes."** — read from the
    same ``tax_groups[j]['group_name']``, which is verbatim
    ``account.tax.group.name`` (``addons/account/models/account_tax.py:2889``)
@@ -259,10 +270,15 @@ def _pick_multi_authority_invoice(ctx, company: dict, avatax_field: bool
     Two passes, in the order the workbook's precondition implies. Pass 1 asks
     only for AvaTax-flagged documents, because those are the ones FG-05
     TC-TAX-002 leaves behind and the only ones whose printed layout the
-    ``account_avatax`` patch changes. Pass 2 falls back to any posted customer
-    invoice with more than one tax line, so that a database whose fiscal
-    position lost its ``is_avatax`` flag still reports the tax breakdown
-    finding rather than blocking on a flag.
+    ``account_avatax`` patch changes. Pass 2 widens to any posted customer
+    invoice with more than one tax line — **for diagnosis only**: the caller
+    BLOCKS when the invoice it gets back is not ``is_avatax``, so that the
+    block message can name the best candidate on the database instead of
+    saying "nothing found". Pass 2 must never become the document this case
+    asserts against: with AvaTax switched off it always wins, and running
+    AvaTax-shaped expectations (one printed row per Avalara jurisdiction,
+    bracketed authority codes) against a legacy OCA-taxed invoice reports a
+    document that was never going to carry a breakdown as broken.
 
     Returns ``(move_row, tax_lines, scanned)``; ``move_row`` is ``{}`` when
     nothing qualifies.
@@ -408,6 +424,40 @@ def test_inv_003(ctx):
             ctx.log("NOTE this invoice belongs to one of this platform's own "
                     "FG07 fixtures rather than to the gallery's data — the "
                     "reading is still valid, but say so when reporting")
+
+        # THE PRECONDITION, ENFORCED. _pick_multi_authority_invoice falls back
+        # to "any posted customer invoice" when no is_avatax document
+        # qualifies, and on a database where AvaTax is switched off that
+        # fallback ALWAYS wins. Running this case's AvaTax-shaped expectations
+        # — one printed row per Avalara jurisdiction, each name carrying a
+        # bracketed authority code — against a legacy OCA-taxed or manually
+        # taxed invoice produces failures that say nothing about the upgrade:
+        # the document was never going to carry an Avalara breakdown. The
+        # workbook's precondition is "FG-05 TC-TAX-002 has passed", i.e. an
+        # AvaTax-flagged document exists, so its absence is a BLOCK.
+        if not is_avatax:
+            ctx.blocked(
+                f"{NO_MULTI_AUTHORITY_INVOICE} — {scanned} posted customer "
+                f"invoice(s) were examined and the best candidate found, "
+                f"{detail.get('name')!r} (fiscal position "
+                f"{m2o_name(detail.get('fiscal_position_id'))!r}), carries "
+                f"{len(tax_lines)} tax journal item(s) but is NOT flagged "
+                f"is_avatax"
+                + ("" if avatax_field else
+                   " (account.move.is_avatax is not readable by this user "
+                   "either, so the flag could not even be tested)")
+                + ". It was taxed by something other than the Enterprise "
+                  "AvaTax connector, so account_avatax's report patch does "
+                  "not apply to it and it can carry no Avalara "
+                  "per-jurisdiction breakdown at all. Asserting this case's "
+                  "expectations against it would report the wrong document "
+                  "as broken. On the mmg_19 restore this is the expected "
+                  "outcome today: 'Use AvaTax' is off, 'Commit Transactions' "
+                  "is off and 0 of 10 fiscal positions have 'Use AvaTax API' "
+                  "ticked, so no document on the database can be is_avatax. "
+                  "That configuration gap is FG-05 TC-DAT-017's finding — fix "
+                  "it there, run FG-05 TC-TAX-002 against the Avalara "
+                  "SANDBOX, and re-run this case")
         ctx.log("SAFETY — nothing below unlinks, writes or re-posts this "
                 "move: unlinking an AvaTax document asks Avalara to void the "
                 "filed transaction")
@@ -572,16 +622,48 @@ def test_inv_003(ctx):
                         f"row where the journal entry has several, that is "
                         f"the defect'")
 
-            # THE decisive assertion. The printed breakdown must be as fine as
-            # the journal entry's, because the journal entry is what the
-            # customer's query will be answered from.
+            # The taxes-vs-groups gap, raised on its own. It is NOT the
+            # decisive assertion below, because the two counts measure
+            # different things: the totals block emits one row per
+            # account.tax.group (report_invoice.xml:535-549), and several
+            # taxes legitimately share one group. Comparing the printed rows
+            # against the number of TAXES would fail every correct system
+            # whose jurisdictions are grouped — while saying nothing about
+            # whether the grouping itself is coarse. So the coarseness is
+            # reported here, and the printed-vs-recorded question is asserted
+            # below on the same unit.
+            if len(by_tax) > len(by_group):
+                finding(ctx,
+                        f"the journal entry records {len(by_tax)} distinct "
+                        f"tax(es) but only {len(by_group)} distinct tax "
+                        f"group(s), so the printed totals block is "
+                        f"structurally coarser than the ledger no matter how "
+                        f"the report behaves: the document prints "
+                        f"account.tax.group.name (addons/account/models/"
+                        f"account_tax.py:2889 ; addons/account/views/"
+                        f"report_invoice.xml:551), so every tax filed under "
+                        f"one group is printed as ONE line. If the gallery "
+                        f"needs a row per Avalara jurisdiction on the "
+                        f"customer's copy, each jurisdiction needs its own "
+                        f"account.tax.group — that is a configuration "
+                        f"decision, not a template change")
+
+            # THE decisive assertion, made on the unit the printed document is
+            # actually built from. The totals block emits one <tr class=
+            # "o_taxes"> per tax_groups[] entry, and each of those is one
+            # account.tax.group, so the ledger-side counterpart is the number
+            # of DISTINCT account.move.line.tax_group_id on the entry's
+            # display_type='tax' lines — not the number of taxes. Every group
+            # the ledger recorded must reach the page; a group that is
+            # recorded and not printed is money the customer's copy does not
+            # explain.
             ctx.check(
                 "The totals block lists the tax by authority: the printed "
-                "document carries one tax row for each distinct tax authority "
-                "the journal entry recorded, not one combined row "
+                "document carries one tax row for each distinct tax GROUP the "
+                "journal entry recorded, not one combined row "
                 "(len(tax_totals subtotals[].tax_groups[]) vs distinct "
-                "account.move.line.tax_line_id where display_type='tax')",
-                len(by_tax), len(groups))
+                "account.move.line.tax_group_id where display_type='tax')",
+                len(by_group), len(groups))
 
             # And each printed row must carry the money the journal entry
             # recorded for it — a breakdown with the right number of rows and
@@ -701,58 +783,45 @@ def test_inv_003(ctx):
                       "rendered document, byte for byte as "
                       "account.tax.group.name holds it", [], missing)
 
-            if is_avatax:
-                suppressed = []
-                if 'name="th_taxes"' in html:
-                    suppressed.append(
-                        'the header cell <th name="th_taxes"> is still '
-                        'rendered, although account_avatax/reports/'
-                        'account_invoice.xml adds not o.is_avatax to its t-if')
-                if 'id="line_tax_ids"' in html:
-                    suppressed.append(
-                        'a per-line tax cell <span id="line_tax_ids"> is '
-                        'still rendered (report_invoice.xml:245)')
-                ctx.check("The line table has no per-line tax column on an "
-                          "AvaTax invoice, as account_avatax's report patch "
-                          "intends", [], suppressed)
-
-                # The patch covers the ungrouped branch only. A stray cell
-                # here is the OPPOSITE misalignment — one column too many —
-                # and it is exactly what workbook step 8 hunts.
-                stray = []
-                if 'id="grouped_line_tax_ids"' in html:
-                    stray.append('<span id="grouped_line_tax_ids">')
-                if 'name="td_taxes_grouped"' in html:
-                    stray.append('<td name="td_taxes_grouped">')
-                ctx.check(
-                    "No stray per-line tax cell survives in the "
-                    "collapsed-section branch of the table, which "
-                    "account_avatax's report patch does not cover "
-                    "(report_invoice.xml:350-354)", [], stray)
-            else:
-                # A FINDING, not an observation: observation() is reserved for
-                # the v19 differences the workbook says are expected and must
-                # not be raised (here, only the on-screen Taxes column). "The
-                # invoice we could find is not an AvaTax document" is not an
-                # expected v19 difference — it is a gap in the evidence that
-                # someone has to close, and the residual step below says how.
-                finding(
-                    ctx,
-                    f"invoice {detail.get('name')!r} is not flagged is_avatax "
+            # is_avatax is TRUE here by construction: the precondition step
+            # BLOCKS the case when the chosen invoice is not AvaTax-flagged,
+            # precisely so that these two AvaTax-only assertions are never
+            # made against a document account_avatax's report patch does not
+            # apply to. There is therefore no "not an AvaTax invoice" branch
+            # left to write — that outcome is a BLOCK with its own reason,
+            # not a half-judged pass.
+            ctx.log(f"invoice {detail.get('name')!r} is flagged is_avatax "
                     f"(fiscal position "
                     f"{m2o_name(detail.get('fiscal_position_id'))!r}), so "
-                    f"account_avatax's report patch does not apply and a "
-                    f"per-line Taxes column is CORRECT on this document. The "
-                    f"tax-breakdown assertions above still stand; only the "
-                    f"'no per-line tax column' half of Expected Result line 4 "
-                    f"cannot be judged from this invoice. Re-run once FG-05 "
-                    f"TC-TAX-002 has left an AvaTax-flagged invoice behind")
-                residual.append(
-                    f"Expected Result line 4's 'no per-line tax column' half "
-                    f"was not judged: the invoice examined "
-                    f"({detail.get('name')!r}) is not an AvaTax document. "
-                    f"Open a genuine AvaTax invoice's PDF and confirm the "
-                    f"Taxes column is absent from the line table.")
+                    f"account_avatax's report patch applies to it and "
+                    f"Expected Result line 4 can be judged in full")
+            suppressed = []
+            if 'name="th_taxes"' in html:
+                suppressed.append(
+                    'the header cell <th name="th_taxes"> is still '
+                    'rendered, although account_avatax/reports/'
+                    'account_invoice.xml adds not o.is_avatax to its t-if')
+            if 'id="line_tax_ids"' in html:
+                suppressed.append(
+                    'a per-line tax cell <span id="line_tax_ids"> is '
+                    'still rendered (report_invoice.xml:245)')
+            ctx.check("The line table has no per-line tax column on an "
+                      "AvaTax invoice, as account_avatax's report patch "
+                      "intends", [], suppressed)
+
+            # The patch covers the ungrouped branch only. A stray cell
+            # here is the OPPOSITE misalignment — one column too many —
+            # and it is exactly what workbook step 8 hunts.
+            stray = []
+            if 'id="grouped_line_tax_ids"' in html:
+                stray.append('<span id="grouped_line_tax_ids">')
+            if 'name="td_taxes_grouped"' in html:
+                stray.append('<td name="td_taxes_grouped">')
+            ctx.check(
+                "No stray per-line tax cell survives in the "
+                "collapsed-section branch of the table, which "
+                "account_avatax's report patch does not cover "
+                "(report_invoice.xml:350-354)", [], stray)
 
             table_match = TABLE_RE.search(html)
             if not table_match:

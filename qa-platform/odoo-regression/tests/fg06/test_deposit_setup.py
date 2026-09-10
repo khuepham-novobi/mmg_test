@@ -88,12 +88,56 @@ is asserted instead is the strictly stronger, printout-free half: nothing
 that does hold a value holds a broken one, and the two sides are counted
 separately because the workbook says the vendor half "is the half most often
 missed".
+
+TC-DAT-019 is an AUDIT: it collects, it does not stop at the first gap
+---------------------------------------------------------------------
+The workbook marks this case READ THIS FIRST and says to run it *before any
+other FG-06 case*, precisely so one pass lists everything that has to be
+fixed. A plain ``ctx.check`` raises on the first mismatch, and that had a
+concrete consequence here: the company-level ``ir.default`` assertion runs
+before the check that the deposit-account fields' own domains still name
+``account.account.deprecated`` — a field Odoo 19 removed. On a database where
+the ``ir.default`` rows did not survive the upgrade (which is the state this
+case exists to detect) the run ended there, so the only automated detector in
+the platform for that PRODUCT defect never executed. Each gap is therefore
+recorded through :func:`_audit` / :func:`_audit_true`, which keep the
+assertion — ``TestContext.check`` appends it and emits its ASSERTION event
+*before* it raises, so expected-vs-actual survives per line — and defer only
+the abort. One closing hard ``ctx.check`` over the collected findings decides
+the verdict, so nothing is weakened. ``ctx.blocked`` / ``ctx.skip`` raise
+``BlockedTest`` / ``SkipTest`` and are deliberately NOT caught: a precondition
+that cannot be evaluated must still stop the case. This is the shape FG-05's
+TC-DAT-017 already uses (``tests/fg05/test_avatax_config.py``).
+
+The two failure shapes, and why one of them needs the raw column
+---------------------------------------------------------------
+The workbook names two ways a contact's deposit account can be wrong after
+the upgrade: *"the contact lost its link"* and *"the account no longer
+exists"*. Only the first is visible over RPC. ``Many2one.to_sql`` wraps a
+company-dependent Many2one in an existence sub-select
+(``odoo/orm/fields_relational.py:466-478``) and every ORM read path goes
+through it, so a stored id whose ``account.account`` row was deleted reads
+back as ``False`` — identical to a contact that never had an override. v19
+erases the dangling reference on the way out, which makes the second failure
+shape invisible to any assertion built on ``read`` or on a domain.
+
+So the second shape is detected from the column itself: the stored jsonb ids
+are read out of ``res_partner.<field>`` (``common.
+stored_partner_deposit_account_ids``) and each one is looked up in
+``account.account`` with ``active_test = False``. A stored id with no
+surviving row — archived or not — is the migration failure. Archived accounts
+stay a SEPARATE finding: they still resolve, are still readable, and are
+reported by the whole-population pass as "the account is deprecated". SQL
+access is optional on this platform, so its absence is reported as a finding
+naming what could not be checked, never as a BLOCK on a case that otherwise
+runs entirely over RPC.
 """
 from __future__ import annotations
 
 import csv
 
 from adapters.base import OdooRPCError
+from framework.context import AssertionFailed
 from framework.registry import test_case
 from tests.fg06.common import (CUSTOMER_SIDE, DEPOSIT_ACCOUNT_FIELD,
                                DEPOSIT_ACCOUNT_TYPE, MARK, MODULE, VENDOR_SIDE,
@@ -107,7 +151,9 @@ from tests.fg06.common import (CUSTOMER_SIDE, DEPOSIT_ACCOUNT_FIELD,
                                make_partner, onchange_values,
                                partner_deposit_account, payment_row,
                                require_v19, residual_manual_step,
-                               set_partner_deposit_account, sweep_fg06, trace)
+                               set_partner_deposit_account,
+                               stored_partner_deposit_account_ids, sweep_fg06,
+                               trace)
 
 INVENTORY_CSV = "TC-DAT-019-deposit-account-inventory.csv"
 
@@ -122,6 +168,34 @@ CSV_LIMIT = 2000
 SIDES = (CUSTOMER_SIDE, VENDOR_SIDE)
 SIDE_LABEL = {CUSTOMER_SIDE: "Customer Deposit Account",
               VENDOR_SIDE: "Vendor Deposit Account"}
+
+
+def _audit(ctx, findings, name, expected, actual):
+    """``ctx.check`` that records the gap and lets the audit carry on.
+
+    See the module docstring: TC-DAT-019 is the case the workbook says to run
+    FIRST, so one pass must reach every section. The assertion itself is kept
+    in full — ``TestContext.check`` appends to ``ctx.assertions`` and emits the
+    ASSERTION event BEFORE it raises — and only the abort is deferred to the
+    closing hard check.
+
+    ``ctx.blocked()`` / ``ctx.skip()`` raise ``BlockedTest`` / ``SkipTest`` and
+    are deliberately NOT caught.
+    """
+    try:
+        ctx.check(name, expected, actual)
+    except AssertionFailed as exc:
+        findings.append(str(exc))
+        ctx.log(f"AUDIT FINDING — {exc}")
+
+
+def _audit_true(ctx, findings, name, condition, actual_desc=""):
+    """``ctx.check_true`` counterpart of :func:`_audit`."""
+    try:
+        ctx.check_true(name, condition, actual_desc=actual_desc)
+    except AssertionFailed as exc:
+        findings.append(str(exc))
+        ctx.log(f"AUDIT FINDING — {exc}")
 
 
 def _partner_form_arch(ctx) -> str:
@@ -162,18 +236,21 @@ def _override_partners(ctx, side: str, company: dict, fallback: dict) -> list:
     priority="P0",
     kind="DATA",
     order=600,
-    description="Read-only FG-06 setup gate: both company_dependent deposit "
+    description="Read-only FG-06 setup gate, run as an AUDIT that reports "
+                "every gap in one pass: both company_dependent deposit "
                 "account fields exist and are readable, the Invoicing tab "
-                "carries them, the company-level default is set on both "
-                "sides, and every contact-level override in the database "
-                "resolves to an account that exists, is not deprecated, is "
-                "reconcilable and has the right account type. Creates "
-                "nothing.",
+                "carries them, neither field's domain names a field v19 "
+                "removed, the company-level default is set on both sides, no "
+                "stored jsonb value points at an account that no longer "
+                "exists, and every contact-level override resolves to an "
+                "account that is not deprecated, is reconcilable and has the "
+                "right account type. Creates nothing.",
     traceability=trace("TC-DAT-019"))
 def test_dat_019(ctx):
     rpc = ctx.adapter.rpc
     evidence = []      # (side, partner, account code/name, verdict) -> CSV
     residual = []
+    findings = []      # every setup gap, reported together at the end
 
     with ctx.step("Precondition (workbook): Odoo 19 with "
                   "account_partner_deposit installed, and the Invoicing tab "
@@ -202,7 +279,8 @@ def test_dat_019(ctx):
                 ctx.log(f"could not fetch the res.partner form arch ({exc})")
             missing_in_view = [f for f in DEPOSIT_ACCOUNT_FIELD.values()
                                if f'name="{f}"' not in arch]
-            ctx.check_true(
+            _audit_true(
+                ctx, findings,
                 "The contact form shows Customer Deposit Account and Vendor "
                 "Deposit Account (account_partner_deposit."
                 "view_partner_deposit_form, inserted after "
@@ -235,7 +313,12 @@ def test_dat_019(ctx):
                                  row.get("name") or "",
                                  "set" if row.get("id") else "NOT SET"))
             for side in SIDES:
-                ctx.check_true(
+                # AUDIT, not abort: this is the assertion that used to end the
+                # run on a database whose ir.default rows did not survive the
+                # upgrade, taking the removed-field product check below down
+                # with it.
+                _audit_true(
+                    ctx, findings,
                     f"A company-level default exists for {SIDE_LABEL[side]} "
                     f"(ir.default on res.partner."
                     f"{DEPOSIT_ACCOUNT_FIELD[side]})",
@@ -262,7 +345,8 @@ def test_dat_019(ctx):
                         f"res.partner.{DEPOSIT_ACCOUNT_FIELD[side]} domain "
                         f"still filters on the removed field "
                         f"account.account.deprecated: {domain}")
-            ctx.check(
+            _audit(
+                ctx, findings,
                 "No deposit-account domain filters on a field Odoo 19 "
                 "removed (account.account.deprecated)", [], stale)
 
@@ -291,7 +375,20 @@ def test_dat_019(ctx):
                     account = seen_accounts[account_id]
                     problems = []
                     if not account.get("id"):
-                        problems.append("the account no longer exists")
+                        # NOT "the account no longer exists": v19 resolves a
+                        # company-dependent Many2one through an existence
+                        # sub-select (odoo/orm/fields_relational.py:466-478),
+                        # so a deleted target and an explicitly cleared
+                        # override both read back as empty and are
+                        # indistinguishable here. Which of the two it is comes
+                        # from the raw stored value, checked in its own step
+                        # below; this branch reports only what it can see.
+                        problems.append(
+                            "the field reads EMPTY for this company while the "
+                            "company default is set, so this contact resolves "
+                            "to no deposit account at all — see the stored-id "
+                            "step for whether the value is dangling or was "
+                            "cleared")
                     else:
                         if account.get("deprecated"):
                             problems.append("the account is deprecated")
@@ -326,9 +423,131 @@ def test_dat_019(ctx):
             # THE assertion of this case: nothing that holds a value holds a
             # broken one. Reported as a list so the evidence names every
             # offender rather than only the first.
-            ctx.check("Every contact-level deposit-account override resolves "
-                      "to an existing, non-deprecated, reconcilable account "
-                      "of the right type", [], broken)
+            _audit(ctx, findings,
+                   "Every contact-level deposit-account override resolves "
+                   "to an existing, non-deprecated, reconcilable account "
+                   "of the right type", [], broken)
+
+        with ctx.step("Workbook If It Fails, second shape: 'the account no "
+                      "longer exists' — every STORED jsonb id still has an "
+                      "account.account row"):
+            # This is the half the ORM cannot show. Many2one.to_sql wraps a
+            # company-dependent Many2one in an existence sub-select
+            # (odoo/orm/fields_relational.py:466-478) and every read path and
+            # every domain goes through it, so a stored id whose account was
+            # DELETED reads back as False — identical to a contact that never
+            # had an override. The id survives only in the column, so the
+            # column is what is read. Archived accounts are NOT this finding:
+            # their row still exists, they resolve, and the pass above already
+            # reports them as deprecated.
+            dangling = []
+            not_checked = []
+            for side in SIDES:
+                raw = stored_partner_deposit_account_ids(ctx, side,
+                                                         company["id"])
+                if not raw["available"]:
+                    ctx.log(f"{SIDE_LABEL[side]}: stored ids not readable — "
+                            f"{raw['reason']}")
+                    # Record it as a NOT-CHECKED finding, not only as a log
+                    # line and a residual. Silence here is indistinguishable
+                    # from "checked and clean", and this is the only detector
+                    # in the platform for the workbook's second failure shape
+                    # — a contact whose stored deposit account no longer
+                    # exists. A green TC-DAT-019 must never imply that shape
+                    # was ruled out when SQL access was never available.
+                    not_checked.append(
+                        f"{SIDE_LABEL[side]}: the 'account no longer exists' "
+                        f"shape was NOT CHECKED — {raw['reason']}")
+                    residual.append(
+                        f"the '{SIDE_LABEL[side]}' half of the workbook's "
+                        f"second failure shape ('the account no longer "
+                        f"exists') COULD NOT BE CHECKED: {raw['reason']}. "
+                        f"Every other assertion in this case ran. Either "
+                        f"configure read-only PostgreSQL access for this "
+                        f"environment and re-run, or check by hand that no "
+                        f"contact's stored deposit account is missing from "
+                        f"the chart of accounts.")
+                    continue
+                stored = raw["stored"]
+                ctx.log(f"{SIDE_LABEL[side]}: {len(stored)} contact(s) carry "
+                        f"a stored id in res_partner."
+                        f"{DEPOSIT_ACCOUNT_FIELD[side]} for company "
+                        f"#{company['id']}")
+                for partner_id, value in raw["unreadable"]:
+                    dangling.append(
+                        f"{SIDE_LABEL[side]} on partner #{partner_id}: the "
+                        f"stored value {value!r} is not an account id")
+                if not stored:
+                    continue
+                wanted_ids = sorted(set(stored.values()))
+                # active_test=False: an ARCHIVED account still exists and is a
+                # different finding — the whole-population pass above already
+                # reports it as deprecated. Only a missing ROW is the
+                # migration failure this step names.
+                alive = set(rpc.call(
+                    "account.account", "search",
+                    [("id", "in", wanted_ids)],
+                    context={"active_test": False}) or [])
+                unresolved = [a for a in wanted_ids if a not in alive]
+                if not unresolved:
+                    ctx.log(f"  all {len(wanted_ids)} distinct stored "
+                            f"account id(s) still exist")
+                    continue
+                # Separate "the row is gone" from "the row exists but this
+                # user cannot see it": account.account carries a multi-company
+                # record rule, so a search proves nothing about rows outside
+                # the acting user's companies and reporting those as deleted
+                # would be a false accusation. The raw table is already
+                # reachable on this path, so it answers directly.
+                present = {row[0] for row in ctx.sql.rows(
+                    "SELECT id FROM account_account WHERE id = ANY(%s)",
+                    (unresolved,))}
+                invisible = sorted(a for a in unresolved if a in present)
+                missing = {a for a in unresolved if a not in present}
+                if invisible:
+                    ctx.log(f"  stored account id(s) {invisible} DO exist in "
+                            f"account_account but are not visible to the "
+                            f"runner user (multi-company record rule on "
+                            f"account.account) — recorded, not reported as "
+                            f"dangling")
+                if not missing:
+                    continue
+                names = {r["id"]: r.get("display_name") or ""
+                         for r in rpc.search_read(
+                             "res.partner",
+                             [("id", "in",
+                               [p for p, a in stored.items()
+                                if a in missing])],
+                             ["display_name"],
+                             context={"active_test": False}) or []}
+                for partner_id, account_id in sorted(stored.items()):
+                    if account_id not in missing:
+                        continue
+                    label = names.get(partner_id, f"partner #{partner_id}")
+                    dangling.append(
+                        f"{SIDE_LABEL[side]} on {label!r} (partner "
+                        f"#{partner_id}) stores account id {account_id}, "
+                        f"which has NO account.account row (searched with "
+                        f"active_test=False, so this is not merely an "
+                        f"archived account) — the migrated value is dangling "
+                        f"and v19 reads the field as EMPTY, so the contact "
+                        f"silently falls back to the company default")
+                    ctx.log(f"  DANGLING — {label!r} (partner "
+                            f"#{partner_id}) -> account id {account_id} "
+                            f"(no such row)")
+                    if len(evidence) < CSV_LIMIT:
+                        evidence.append((side, label, str(account_id), "",
+                                         "stored account id no longer exists"))
+            _audit(ctx, findings,
+                   "No contact stores a deposit-account id whose "
+                   "account.account row is gone (the workbook's 'the account "
+                   "no longer exists')", [], dangling)
+            # A detector that could not run must not read as a clean result.
+            _audit(ctx, findings,
+                   "The 'the account no longer exists' shape was actually "
+                   "checked on both sides (it needs read-only PostgreSQL: set "
+                   "ODOO<version>_PG_HOST / _PG_USER / _PG_PASSWORD in "
+                   "config/local.yaml)", [], not_checked)
 
         with ctx.step("Workbook Test Data: the VENDOR side — 'the half most "
                       "often missed'"):
@@ -356,14 +575,32 @@ def test_dat_019(ctx):
                 f"contact and code by code. The platform does not hold the "
                 f"printout, so 'the same account code it had in the old "
                 f"system' and 'no field that should hold a value is blank' "
-                f"are the two lines only a human can settle. Separate the "
-                f"two failure shapes the workbook names: 'the contact lost "
-                f"its link' (the contact now falls back to the company "
-                f"default, so it is absent from the CSV) versus 'the account "
-                f"no longer exists' (it is in the CSV with a verdict other "
-                f"than ok). Do NOT re-type any value — hand-typing hides the "
-                f"size of the problem and the migration would need re-running "
-                f"anyway.")
+                f"are the two lines only a human can settle. Of the two "
+                f"failure shapes the workbook names, 'the account no longer "
+                f"exists' is now detected automatically from the stored jsonb "
+                f"ids (its own step above, and any offender appears in the "
+                f"CSV with the verdict 'stored account id no longer exists'); "
+                f"what remains for the human is 'the contact lost its link' — "
+                f"a contact the printout lists that is ABSENT from this CSV "
+                f"has fallen back to the company default. Do NOT re-type any "
+                f"value — hand-typing hides the size of the problem and the "
+                f"migration would need re-running anyway.")
+
+        # One verdict for the whole audit. Every gap above was already
+        # recorded as its own assertion (ctx.check appends and emits BEFORE it
+        # raises), so the evidence keeps expected-vs-actual per line while the
+        # run still reaches every section — including the removed-field
+        # product check, which used to sit downstream of an ir.default data
+        # assertion that aborted the case before it.
+        with ctx.step("Audit summary: every deposit-account setup gap found, "
+                      "reported together"):
+            if findings:
+                ctx.log(f"{len(findings)} setup gap(s) found — fix all of "
+                        f"them before running the rest of FG-06:")
+                for n, finding in enumerate(findings, 1):
+                    ctx.log(f"  {n}. {finding}")
+            # HARD check: this is the one that decides the verdict.
+            ctx.check("Deposit-account setup audit findings", [], findings)
     finally:
         with ctx.step("Evidence: write the deposit-account inventory for the "
                       "printout tick-off"):

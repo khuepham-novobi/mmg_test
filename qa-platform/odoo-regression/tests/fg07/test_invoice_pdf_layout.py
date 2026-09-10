@@ -24,63 +24,68 @@ The three Expected Result lines, and what each is read from
    (``tests/fg07/common.py::report_html``). The ``with_payments`` variant is
    mandatory — item (g)'s "Payment Type:" line lives inside
    ``t-if="print_with_payments"``, which only that template sets
-   (``addons/account/views/report_invoice.xml:679-682``, :379). Letter by
-   letter, and where each one comes from:
+   (``addons/account/views/report_invoice.xml:679-682``, :379).
 
-   * **(a) "Invoice Address:" above the customer address** — from the v15
-     override ``mmg_change_invoice_template/views/report_invoice.xml:6-17``,
-     which replaces ``//t[@t-set='address']``. **Odoo 19 has THREE
-     ``<t t-set="address">`` nodes** — one per address branch:
-     ``address_not_same_as_shipping`` (``addons/account/views/
-     report_invoice.xml:18-19``), ``address_same_as_shipping`` (:32-33) and
-     ``no_shipping`` (:46-47) — and ``position="replace"`` patches only the
-     FIRST match. See "A finding this case will surface" below.
-   * **(b) a first Product column on every line** — from
-     ``mmg_account/report/report_invoice.xml:11-21``, which inserts
-     ``<th name="th_product">`` before ``th_description``
-     (``addons/account/views/report_invoice.xml:176``) and
-     ``<td name="account_invoice_line_product">`` before
-     ``account_invoice_line_name`` (:225). Read from the rendered
-     ``name="invoice_line_table"`` (:173).
-   * **(c) NO "Disc.%" column** — from
-     ``mmg_change_invoice_template/views/report_invoice.xml:52-54``, which
-     forces ``display_discount`` to ``False``; the stock header is
-     ``<th name="th_discount">`` with the literal text ``Disc.%``
+   **One module owns all nine letters in Odoo 19.** ``mmg_account`` ABSORBED
+   ``mmg_change_invoice_template`` in the v19 port (decision D1 — see
+   ``mmg_account/__manifest__.py``), and the consolidated layout lives in
+   ``mmg_account/report/report_invoice.xml``, template id
+   ``report_invoice_document_inherit``. There is NO
+   ``mmg_change_invoice_template`` on ``staging_19`` and its absence is
+   correct. Letter by letter, and which xpath of that one file implements it:
+
+   * **(a) "Invoice Address:" above the customer address** — three
+     ``position="before"`` xpaths, one per v19 address branch:
+     ``//div[@name='address_not_same_as_shipping']/t[@t-set='address']/address``,
+     ``//div[@name='address_same_as_shipping']/...`` and
+     ``//div[@name='no_shipping']/...``
+     (``addons/account/views/report_invoice.xml:18-19``, :32-33, :46-47).
+     v15 replaced the single ``<t t-set="address">`` outright; v19 has three,
+     and ``position="replace"`` patches only the first match, so the port
+     inserts the label into all three instead. See "What the v19 port changed
+     about item (a)" below.
+   * **(b) a first Product column on every line** — a
+     ``<th name="th_product">`` inserted before ``//th[@name='th_description']``
+     (``addons/account/views/report_invoice.xml:176``) and a
+     ``<td name="account_invoice_line_product">`` inserted before
+     ``//td[@name='account_invoice_line_name']`` (:225). Read from the
+     rendered ``name="invoice_line_table"`` (:173).
+   * **(c) NO "Disc.%" column** — ``//t[@t-set='display_discount']``
+     ``position="attributes"``, forcing ``t-value`` to ``False``; the stock
+     header is ``<th name="th_discount">`` with the literal text ``Disc.%``
      (``addons/account/views/report_invoice.xml:179-181``).
-   * **(d) the header label reads "Order Number:", not "Source"** — from
-     ``mmg_change_invoice_template/views/report_invoice.xml:24-26``
-     replacing ``//div[@name='origin']/strong[1]``; v19's stock label is the
-     bare word ``Source`` (``addons/account/views/report_invoice.xml:
-     146-149``).
+   * **(d) the header label reads "Order Number:", not "Source"** —
+     ``//div[@name='origin']/strong[1]`` ``position="replace"``; v19's stock
+     label is the bare word ``Source``
+     (``addons/account/views/report_invoice.xml:146-149``).
    * **(e) no Invoice Date / Due Date / Customer Code / Reference blocks** —
-     four ``position="replace"`` xpaths at
-     ``mmg_change_invoice_template/views/report_invoice.xml:29, 32, 35, 38``
-     against ``addons/account/views/report_invoice.xml:127, 134, 150, 154``.
-   * **(f) the invoice number is not next to the word "Invoice"** — from
-     ``mmg_change_invoice_template/views/report_invoice.xml:20-21``,
-     removing ``//span[@t-field='o.name']``
-     (``addons/account/views/report_invoice.xml:121``). That span sits
-     inside ``layout_document_title``, which every ``web.external_layout``
-     variant renders into an ``<h2>`` (``addons/web/views/
-     report_templates.xml:360, 420, 484, 548, 581, 707, 792``) — so the
-     assertion is made INSIDE the heading, never over the whole page.
-   * **(g) "Payment Type:" under each payment line** — from
-     ``mmg_account/report/report_invoice.xml:5-9``, inserted after
+     four ``position="attributes"`` xpaths setting ``t-if="False"`` on
+     ``//div[@name='invoice_date']``, ``//div[@name='due_date']``,
+     ``//div[@name='customer_code']`` and ``//div[@name='reference']``
+     (``addons/account/views/report_invoice.xml:127, 134, 150, 154``).
+     **Suppressed, not removed** — v19 ships other views that xpath
+     THROUGH these nodes (``account_edi_ubl_cii`` locates
+     ``//p[@name='payment_communication']/parent::*``), so deleting them would
+     break those modules at install time. The printed page is identical.
+   * **(f) the invoice number is not next to the word "Invoice"** —
+     ``//span[@t-field='o.name']`` ``position="attributes"``, ``t-if="False"``
+     (``addons/account/views/report_invoice.xml:121``). That span sits inside
+     ``layout_document_title``, which every ``web.external_layout`` variant
+     renders into an ``<h2>`` (``addons/web/views/report_templates.xml:360,
+     420, 484, 548, 581, 707, 792``) — so the assertion is made INSIDE
+     the heading, never over the whole page.
+   * **(g) "Payment Type:" under each payment line** — inserted after
      ``//t[@t-foreach='payments_vals']/tr/td[1]/i``
-     (``addons/account/views/report_invoice.xml:382-389``). The two values
-     it prints come from ``account.move.invoice_payments_widget``:
+     (``addons/account/views/report_invoice.xml:382-389``). The two values it
+     prints come from ``account.move.invoice_payments_widget``:
      ``journal_name`` is ``counterpart_line.journal_id.name`` and
-     ``payment_method_name`` is
-     ``payment_id.payment_method_line_id.name``
+     ``payment_method_name`` is ``payment_id.payment_method_line_id.name``
      (``addons/account/models/account_move.py:1562, 1569``).
-   * **(h) a "Merchandise Received By:" signature line** — from
-     ``mmg_change_invoice_template/views/report_invoice.xml:57-61``,
-     inserted after ``//div[@id='qrcode']``
-     (``addons/account/views/report_invoice.xml:480``).
-   * **(i) no "Payment Communication:" paragraph** — from
-     ``mmg_change_invoice_template/views/report_invoice.xml:41``, removing
-     ``//p[@name='payment_communication']``
-     (``addons/account/views/report_invoice.xml:471``).
+   * **(h) a "Merchandise Received By:" signature line** — inserted after
+     ``//div[@id='qrcode']`` (``addons/account/views/report_invoice.xml:480``).
+   * **(i) no "Payment Communication:" paragraph** —
+     ``//p[@name='payment_communication']`` ``position="attributes"``,
+     ``t-if="False"`` (``addons/account/views/report_invoice.xml:471``).
 
 2. **"The page renders with no blank boxes, no overlapping text and no
    missing totals."** — the HTTP status of the render, the presence of
@@ -99,16 +104,17 @@ The three Expected Result lines, and what each is read from
 
 The diagnostic layer the workbook cannot describe
 -------------------------------------------------
-Before a single pixel is read, the DEPLOYED arch of both override views is
-fetched (``ir.model.data`` -> ``ir.ui.view.arch``) and all FIFTEEN inherited
-xpath expressions — eleven from ``mmg_change_invoice_template``, four from
-``mmg_account`` — are checked for presence. That turns the vague verdict
-"the PDF looks wrong" into "xpath N of module M is not in the deployed
-view", which is the difference between a layout complaint and a five-minute
-fix. It is asserted AFTER the nine letters, because the letters are the
-workbook's own Expected Result and must be the headline verdict; the full
-xpath verdict is logged and written to CSV before either assertion runs, so
-it survives whichever one fails first.
+Before a single pixel is read, the DEPLOYED arch of ``mmg_account``'s override
+view is fetched (``ir.model.data`` -> ``ir.ui.view.arch``) and every inherited
+xpath expression of ``mmg_account/report/report_invoice.xml`` is checked for
+presence — see :data:`TEMPLATE_XPATHS`, which is that file's own
+inventory rather than the v15 two-module one. That turns the vague verdict
+"the PDF looks wrong" into "xpath N is not in the deployed view", which is the
+difference between a layout complaint and a five-minute fix. It is asserted
+AFTER the nine letters, because the letters are the workbook's own Expected
+Result and must be the headline verdict; the full xpath verdict is logged and
+written to CSV before either assertion runs, so it survives whichever one
+fails first.
 
 Documented adaptation — HTML is read, the PDF is attached
 ----------------------------------------------------------
@@ -142,19 +148,24 @@ Two fixtures, deliberately
   invoice the Disc.% column would be absent whether or not the MMG override
   landed.
 
-A finding this case will surface
----------------------------------
-Item (a) is expected to FAIL on Invoice A under Odoo 19, and that failure is
-the whole point of the case. v15's ``account.report_invoice_document`` had a
-single ``<t t-set="address">``; v19 split it into three branches, and
-``position="replace"`` resolves to the first match only
-(``odoo/tools/template_inheritance.py``, ``locate_node``). The first match is
-the ``address_not_same_as_shipping`` branch, so the gallery's "Invoice
-Address:" / "Shipping Address:" block renders ONLY when the delivery address
-differs from the invoice address — which on an ordinary gallery invoice it
-does not. Invoice A therefore prints a stock Odoo address block and Invoice B
-prints the MMG one. The two fixtures exist so the report says which branch
-broke rather than "sometimes it works".
+What the v19 port changed about item (a), and why both fixtures still exist
+---------------------------------------------------------------------------
+This case was written against the v15 shape, where a single
+``position="replace"`` on ``<t t-set="address">`` would have patched one of
+v19's THREE address branches and item (a) would have failed on an ordinary
+invoice. **The v19 port fixed that**: ``mmg_account/report/report_invoice.xml``
+inserts the "Invoice Address:" label into all three branches
+(``address_not_same_as_shipping``, ``address_same_as_shipping``,
+``no_shipping``) with three ``position="before"`` xpaths, so item (a) is
+expected to PASS on both fixtures. The two fixtures are kept anyway, and are
+still worth their cost: they exercise two different branches of the template,
+so if one of the three xpaths is ever dropped the report says WHICH branch
+lost the label instead of "sometimes it works". Invoice A takes the
+``address_same_as_shipping`` branch, Invoice B the
+``address_not_same_as_shipping`` one; the third (``no_shipping``) is not
+reachable from a fixture, because ``_compute_partner_shipping_id`` always
+fills the field (``addons/account/models/account_move.py:1026-1031``), and is
+covered by the deployed-arch check instead.
 
 Expected v19 differences that are logged and NOT asserted (R11)
 ----------------------------------------------------------------
@@ -177,7 +188,8 @@ from tests.fg07.common import (INVOICE_REPORT, MARK, NO_MMG_INVOICE_TEMPLATE,
                                WORKFLOW, WORKFLOW_NAME, acting_company,
                                cleanup, company_ctx, confirm_payment_register,
                                finding, m2o_id, m2o_name, make_invoice,
-                               make_partner, make_product, money, observation,
+                               make_partner, make_product, module_state,
+                               money, observation,
                                register_payment, report_html, report_pdf,
                                require_module, require_v19,
                                residual_manual_step, sweep_fg07, trace,
@@ -187,52 +199,86 @@ CHECKLIST_CSV = "TC-INV-001-checklist.csv"
 XPATH_CSV = "TC-INV-001-template-xpaths.csv"
 PDF_NAME = "TC-INV-001-invoice.pdf"
 
-# The two MMG modules that between them own the printed invoice. Both must be
-# installed: mmg_change_invoice_template owns items (a), (c) to (f), (h) and
-# (i); mmg_account owns items (b) and (g).
-TEMPLATE_MODULES = ("mmg_change_invoice_template", "mmg_account")
+# The ONE MMG module that owns the printed invoice in Odoo 19. mmg_account
+# ABSORBED mmg_change_invoice_template in the v19 port (decision D1 —
+# mmg_account/__manifest__.py, "Absorbs mmg_change_invoice_template as of the
+# v19 upgrade"), and the consolidated layout is
+# mmg_account/report/report_invoice.xml. Gating on the v15 module name as well
+# made this case BLOCK on every run and never clear, because no module of that
+# name exists on staging_19 — its absence is the decision, not damage.
+# TC-INV-002 already gates on mmg_account alone; this now matches it.
+TEMPLATE_MODULES = ("mmg_account",)
 
-# The Studio-side field the v15 template dereferences unconditionally inside a
-# t-if. It is declared in NO module in the MMG repository — it only ever
-# existed as a database-level x_ field — so a migration that did not carry it
-# across makes the whole report raise rather than render badly.
+# The Studio-managed field the Legal Sale Date block prints. In v19 the
+# template GUARDS it — t-if="'x_legal_invoice_date' in o._fields and
+# o.x_legal_invoice_date" (decision D4) — so its absence costs one printed
+# line and nothing else. The v19 port also formalises it as a coded field on
+# account.move in mmg_legal_date (FG-16 D3), so "present" now has two
+# meanings worth telling apart: a module field, or a leftover Studio row.
 LEGAL_DATE_FIELD = "x_legal_invoice_date"
+LEGAL_DATE_MODULE = "mmg_legal_date"
 
-# Every inherited xpath the two modules apply to account.report_invoice_document,
-# verbatim from the source, with the workbook item each one implements.
+# Every inherited xpath mmg_account applies to account.report_invoice_document,
+# verbatim from mmg_account/report/report_invoice.xml on staging_19, with the
+# workbook item each one implements. This is that ONE file's own inventory —
+# NOT the v15 two-module list, which reported eleven false MISSINGs because
+# their module does not exist here.
+#
+# th_priceunit is deliberately ABSENT from this list. v15 rewrote its class to
+# Bootstrap 4's "text-right"; Odoo 19 already ships the correct Bootstrap 5
+# "text-end", so the port left the node alone on purpose ("th_priceunit is
+# deliberately NOT touched", report_invoice.xml). Listing it here would report
+# a decision as damage. The rendered alignment is still asserted, at the end
+# of the case, against the STOCK v19 class.
+#
 # (module, xpath expr, position, what it implements)
 TEMPLATE_XPATHS = (
-    ("mmg_change_invoice_template", "//t[@t-set='address']", "replace",
-     "item (a) — the 'Invoice Address:' / 'Shipping Address:' block"),
-    ("mmg_change_invoice_template", "//span[@t-field='o.name']", "replace",
-     "item (f) — removes the invoice number from the document title"),
-    ("mmg_change_invoice_template", "//div[@name='origin']/strong[1]",
-     "replace", "item (d) — relabels 'Source' as 'Order Number:'"),
-    ("mmg_change_invoice_template", "//div[@name='invoice_date']", "replace",
-     "item (e) — removes the Invoice Date block"),
-    ("mmg_change_invoice_template", "//div[@name='due_date']", "replace",
-     "item (e) — removes the Due Date block"),
-    ("mmg_change_invoice_template", "//div[@name='customer_code']", "replace",
-     "item (e) — removes the Customer Code block"),
-    ("mmg_change_invoice_template", "//div[@name='reference']", "replace",
-     "item (e) — removes the Reference block"),
-    ("mmg_change_invoice_template", "//p[@name='payment_communication']",
-     "replace", "item (i) — removes the Payment Communication paragraph"),
-    ("mmg_change_invoice_template", "//div[@name='origin']", "after",
-     "adds the Legal Sale Date block (dereferences "
-     f"o.{LEGAL_DATE_FIELD})"),
-    ("mmg_change_invoice_template", "//t[@t-set='display_discount']",
-     "attributes", "item (c) — forces display_discount to False"),
-    ("mmg_change_invoice_template", "//div[@id='qrcode']", "after",
-     "item (h) — adds the 'Merchandise Received By:' signature line"),
-    ("mmg_account", "//t[@t-foreach='payments_vals']/tr/td[1]/i", "after",
-     "item (g) — adds the 'Payment Type:' line under each payment"),
+    ("mmg_account",
+     "//div[@name='address_not_same_as_shipping']/t[@t-set='address']/address",
+     "before",
+     "item (a) — the 'Invoice Address:' label, delivery-differs branch"),
+    ("mmg_account",
+     "//div[@name='address_same_as_shipping']/t[@t-set='address']/address",
+     "before",
+     "item (a) — the 'Invoice Address:' label, same-address branch"),
+    ("mmg_account",
+     "//div[@name='no_shipping']/t[@t-set='address']/address", "before",
+     "item (a) — the 'Invoice Address:' label, no-shipping branch"),
+    ("mmg_account", "//span[@t-field='o.name']", "attributes",
+     "item (f) — suppresses the invoice number in the document title "
+     "(t-if=False)"),
+    ("mmg_account", "//div[@name='origin']/strong[1]", "replace",
+     "item (d) — relabels 'Source' as 'Order Number:'"),
+    ("mmg_account", "//div[@name='origin']", "after",
+     f"adds the Legal Sale Date block, guarded by "
+     f"'{LEGAL_DATE_FIELD}' in o._fields (decision D4)"),
+    ("mmg_account", "//div[@name='invoice_date']", "attributes",
+     "item (e) — suppresses the Invoice Date block (t-if=False)"),
+    ("mmg_account", "//div[@name='due_date']", "attributes",
+     "item (e) — suppresses the Due Date block (t-if=False)"),
+    ("mmg_account", "//div[@name='customer_code']", "attributes",
+     "item (e) — suppresses the Customer Code block (t-if=False)"),
+    ("mmg_account", "//div[@name='reference']", "attributes",
+     "item (e) — suppresses the Reference block (t-if=False)"),
+    ("mmg_account", "//p[@name='payment_communication']", "attributes",
+     "item (i) — suppresses the Payment Communication paragraph "
+     "(t-if=False)"),
+    ("mmg_account", "//t[@t-set='display_discount']", "attributes",
+     "item (c) — forces display_discount to False"),
     ("mmg_account", "//th[@name='th_description']", "before",
      "item (b) — adds the Product column HEADER"),
     ("mmg_account", "//td[@name='account_invoice_line_name']", "before",
      "item (b) — adds the Product column CELL on every product line"),
-    ("mmg_account", "//th[@name='th_priceunit']", "attributes",
-     "restyles the Unit Price header (Bootstrap 4 'text-right')"),
+    ("mmg_account",
+     "//t[@t-set='line_colspan']"
+     "[following-sibling::t[@name='account_invoice_line_accountable']]",
+     "attributes",
+     "widens line_colspan to 4 so section and note rows span the extra "
+     "Product column"),
+    ("mmg_account", "//t[@t-foreach='payments_vals']/tr/td[1]/i", "after",
+     "item (g) — adds the 'Payment Type:' line under each payment"),
+    ("mmg_account", "//div[@id='qrcode']", "after",
+     "item (h) — adds the 'Merchandise Received By:' signature line"),
 )
 
 # The nine checklist letters, worded as the workbook words them (step 4).
@@ -348,8 +394,10 @@ def _evaluate_letters(ctx, page: str, invoice: dict) -> dict:
             f"{invoice['shipping_name']!r} vs partner_id="
             f"{invoice['partner_name']!r} -> the page took the "
             f"{invoice['address_branch']} branch of the three v19 address "
-            f"branches, and mmg_change_invoice_template patches only the "
-            f"first one")
+            f"branches. mmg_account/report/report_invoice.xml carries one "
+            f"position=\"before\" xpath for EACH of the three branches, so "
+            f"the label should be there whichever one renders — check the "
+            f"deployed-arch verdict below for the branch named here")
 
     # ---- (b) the Product column -------------------------------------------
     header_cells = _cells(thead, "th")
@@ -619,7 +667,7 @@ def _describe_invoice(ctx, move_id: int, label: str,
     if not shipping_id:
         branch = "no_shipping (:46)"
     elif shipping_id != partner_id:
-        branch = "address_not_same_as_shipping (:18) — the ONLY patched one"
+        branch = "address_not_same_as_shipping (:18)"
     else:
         branch = "address_same_as_shipping (:32)"
     return {
@@ -657,8 +705,8 @@ def _describe_invoice(ctx, move_id: int, label: str,
                 "Disc.%, Order Number, the four removed header blocks, no "
                 "invoice number in the title, Payment Type, the Merchandise "
                 "Received By signature line and no Payment Communication — "
-                "then names which of the fifteen inherited xpaths did not "
-                "land.",
+                "then names which of mmg_account's inherited xpaths did "
+                "not land.",
     traceability=trace("TC-INV-001"))
 def test_inv_001(ctx):
     rpc = ctx.adapter.rpc
@@ -676,7 +724,8 @@ def test_inv_001(ctx):
     payment_ids: list[int] = []
 
     with ctx.step("Preconditions (workbook): Odoo 19 with the MMG invoice "
-                  "template modules installed, and a printable report"):
+                  "template module (mmg_account) installed, and a printable "
+                  "report"):
         require_v19(ctx)
         company = acting_company(ctx)
         ctx.log(f"acting company #{company['id']} {company['name']!r} — "
@@ -688,30 +737,59 @@ def test_inv_001(ctx):
         for module in TEMPLATE_MODULES:
             require_module(ctx, module, NO_MMG_INVOICE_TEMPLATE)
 
-        # P2. The Studio field the override dereferences. This is a BLOCK and
-        # not a failure of item (a)..(i), because without it the report does
-        # not render badly — it raises, and every letter would be reported as
-        # missing for one single upstream cause.
+        # P2. The Studio-managed field the Legal Sale Date block prints.
+        # OBSERVED, NEVER BLOCKED. The v15 template dereferenced it
+        # unconditionally inside a t-if, so its absence would have made QWeb
+        # raise and the report return 500 for every invoice. The v19 port
+        # GUARDS it — t-if="'x_legal_invoice_date' in o._fields and
+        # o.x_legal_invoice_date" in mmg_account/report/report_invoice.xml,
+        # decision D4 — precisely so that a Studio layer which did not
+        # survive the migration costs this PDF ONE LINE instead of making it
+        # unprintable. Blocking the whole case here would therefore have
+        # stopped all nine workbook letters over a block the workbook does not
+        # even list.
         legal_field = rpc.search_read(
             "ir.model.fields",
             [("model", "=", "account.move"), ("name", "=", LEGAL_DATE_FIELD)],
             ["name", "ttype", "state"], limit=1)
-        if not legal_field:
-            ctx.blocked(
-                f"account.move has no {LEGAL_DATE_FIELD!r} field on this "
-                f"database. mmg_change_invoice_template/views/"
-                f"report_invoice.xml:45 renders "
-                f"<div t-if=\"o.{LEGAL_DATE_FIELD}\">, and QWeb raises on an "
-                f"unknown attribute — so the Invoice PDF report will return "
-                f"500 for EVERY invoice, not merely print the wrong layout. "
-                f"That is the cause to report: the Legal Sale Date field was "
-                f"never a module field in the MMG repository, it existed only "
-                f"as a database-level x_ field, so nothing in the code carries "
-                f"it across an upgrade. Re-create it (Studio, or a data "
-                f"script) and re-run this case")
-        ctx.log(f"{LEGAL_DATE_FIELD}: present as "
-                f"{legal_field[0].get('ttype')!r} "
-                f"(ir.model.fields.state={legal_field[0].get('state')!r})")
+        legal_module = module_state(rpc, LEGAL_DATE_MODULE)
+        ctx.log(f"module {LEGAL_DATE_MODULE!r} — the v19 port that declares "
+                f"account.move.{LEGAL_DATE_FIELD} as a coded field "
+                f"(FG-16 D3): {legal_module or 'no such module row'}")
+        if legal_field:
+            ctx.log(f"account.move.{LEGAL_DATE_FIELD}: present as "
+                    f"{legal_field[0].get('ttype')!r}, "
+                    f"ir.model.fields.state="
+                    f"{legal_field[0].get('state')!r} "
+                    f"('base' = a module declares it; 'manual' = it is still "
+                    f"a database-level Studio row)")
+        else:
+            finding(ctx,
+                    f"account.move has no {LEGAL_DATE_FIELD!r} field on this "
+                    f"database, so the invoice's Legal Sale Date block prints "
+                    f"NOTHING. This is a lost line, NOT a broken report: "
+                    f"mmg_account/report/report_invoice.xml guards the field "
+                    f"with \"'{LEGAL_DATE_FIELD}' in o._fields\" (decision "
+                    f"D4), so QWeb does not raise and all nine of the "
+                    f"workbook's checklist letters render normally — none "
+                    f"of them is the Legal Sale Date. Cause: the field was "
+                    f"a Studio row on v15 and Studio rows live only in the "
+                    f"database. The v19 port formalises it in "
+                    f"{LEGAL_DATE_MODULE!r} (state "
+                    f"{legal_module or 'no such module row'}) — install "
+                    f"that module, or re-create the field, if the gallery "
+                    f"still prints a Legal Sale Date")
+            residual.append(
+                f"The Legal Sale Date block is NOT PROVEN by this run: "
+                f"account.move.{LEGAL_DATE_FIELD} does not exist on this "
+                f"database, so the block's own t-if is False and there is "
+                f"nothing on the page to look at. It is reported as neither a "
+                f"pass nor a failure — the workbook's nine letters do not "
+                f"include it. Decide with the client whether the gallery "
+                f"still needs that line; if it does, install "
+                f"{LEGAL_DATE_MODULE!r} (or re-create the Studio field), "
+                f"print one invoice that HAS a legal date and confirm the "
+                f"block appears next to Order Number.")
 
         # P4. The ir.actions.report the Print button runs.
         report_rows = rpc.search_read(
@@ -731,8 +809,10 @@ def test_inv_001(ctx):
         sweep_fg07(ctx)
 
     try:
-        with ctx.step("Diagnostic (not in the workbook): all FIFTEEN "
-                      "inherited xpaths are in the DEPLOYED view arch"):
+        with ctx.step(f"Diagnostic (not in the workbook): all "
+                      f"{len(TEMPLATE_XPATHS)} inherited xpaths of "
+                      f"mmg_account/report/report_invoice.xml are in the "
+                      f"DEPLOYED view arch"):
             # Read the arch Odoo is actually running, not the arch on disk.
             # A view whose data file failed to load, or was disabled by
             # Studio, leaves the module 'installed' and the layout stock.
@@ -994,7 +1074,7 @@ def test_inv_001(ctx):
                             ctx,
                             f"invoice {invoice['label']} prints the v19 "
                             f"header block name={block!r}, which did not "
-                            f"exist when mmg_change_invoice_template was "
+                            f"exist when the gallery's v15 invoice layout was "
                             f"written (addons/account/views/"
                             f"report_invoice.xml:138/142/158). The workbook's "
                             f"item (e) lists Invoice Date, Due Date, Customer "
@@ -1034,14 +1114,17 @@ def test_inv_001(ctx):
                       [], failures)
 
         with ctx.step("Diagnosis behind Expected line 1: every inherited "
-                      "xpath of both MMG modules is in the deployed arch"):
+                      "xpath of mmg_account is in the deployed arch"):
             # Asserted after the letters, because a missing xpath is the
             # CAUSE and the letters are the workbook's stated effect. Both
             # verdicts are already in the log and in the CSVs, so whichever
             # assertion fires first, the tester has the whole picture.
-            ctx.check("All fifteen inherited xpaths of "
-                      "mmg_change_invoice_template (11) and mmg_account (4) "
-                      "are present in the view arch Odoo 19 is running",
+            ctx.check(f"All {len(TEMPLATE_XPATHS)} inherited xpaths of "
+                      f"mmg_account/report/report_invoice.xml — the single "
+                      f"consolidated template that absorbed "
+                      f"mmg_change_invoice_template in the v19 port "
+                      f"(decision D1) — are present in the view arch Odoo 19 "
+                      f"is running",
                       [], missing_xpaths)
 
         with ctx.step("Expected Result line 2: the page renders with no "
@@ -1103,15 +1186,20 @@ def test_inv_001(ctx):
 
         with ctx.step("Beyond the workbook: the Unit Price header is still "
                       "right-aligned under Bootstrap 5"):
-            # mmg_account/report/report_invoice.xml:23-27 rewrites
-            # th_priceunit's class to the Bootstrap 4 'text-right'. Odoo 19
-            # ships Bootstrap 5, where that class DOES NOT EXIST — the stock
-            # header uses 'text-end' (addons/account/views/
-            # report_invoice.xml:178). Nothing errors; the Unit Price heading
-            # simply stops being right-aligned over its right-aligned column,
-            # which is exactly the kind of "it looked fine" difference the
-            # workbook warns about. Asserted last so it can never mask one of
-            # the nine workbook letters.
+            # v15's mmg_account rewrote th_priceunit's class to the Bootstrap
+            # 4 string 'text-nowrap text-right'. Odoo 19 ships Bootstrap 5,
+            # where 'text-right' DOES NOT EXIST, and the stock header already
+            # carries the correct 'text-end' (addons/account/views/
+            # report_invoice.xml:178) — so the v19 port deliberately does
+            # NOT touch this node ("th_priceunit is deliberately NOT touched",
+            # mmg_account/report/report_invoice.xml). What is asserted here is
+            # therefore the RESULT that decision depends on: the rendered
+            # header must carry 'text-end'. If it does not, either a module is
+            # still applying the dead Bootstrap 4 class or the stock header
+            # changed, and the Unit Price heading is no longer right-aligned
+            # over its right-aligned column — exactly the kind of "it
+            # looked fine" difference the workbook warns about. Asserted last
+            # so it can never mask one of the nine workbook letters.
             misaligned = []
             for invoice in invoices:
                 header = _open_tag(pages[invoice["id"]], "th", "th_priceunit")
@@ -1121,16 +1209,20 @@ def test_inv_001(ctx):
                         f"th_priceunit header at all")
                 elif "text-end" not in header:
                     misaligned.append(
-                        f"invoice {invoice['label']}: {header} — Bootstrap 5 "
-                        f"has no 'text-right' class, so the Unit Price "
-                        f"heading is no longer right-aligned")
+                        f"invoice {invoice['label']}: {header} — the "
+                        f"Bootstrap 5 'text-end' class is absent, so the Unit "
+                        f"Price heading is no longer right-aligned over its "
+                        f"right-aligned column (Bootstrap 5 does not define "
+                        f"v15's 'text-right')")
                 else:
                     ctx.log(f"invoice {invoice['label']} th_priceunit: "
                             f"{header}")
             ctx.check("The Unit Price column header carries the Bootstrap 5 "
-                      "'text-end' class that Odoo 19 uses to right-align it "
-                      "(mmg_account replaced it with Bootstrap 4's "
-                      "'text-right', which Odoo 19 does not define)",
+                      "'text-end' class that Odoo 19 uses to right-align it. "
+                      "The v19 port leaves th_priceunit alone on purpose, so "
+                      "this is the stock v19 class arriving intact; a failure "
+                      "means something is still applying v15's Bootstrap 4 "
+                      "'text-right', which Odoo 19 does not define",
                       [], misaligned)
 
         with ctx.step("Precondition audit, deliberately last: the fixture "

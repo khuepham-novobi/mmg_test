@@ -60,7 +60,8 @@ from adapters.base import OdooRPCError
 from framework.registry import test_case
 from tests.fg06.common import (CUSTOMER_SIDE, MODULE_SALE, OPTION_FIXED,
                                WORKFLOW, WORKFLOW_NAME, acting_company,
-                               cleanup, deposit_accounts_for_test,
+                               button_attrs, cleanup,
+                               deposit_accounts_for_test,
                                deposit_popup_state, make_order, make_partner,
                                make_product, open_make_deposit_wizard,
                                order_totals, require_sale_deposit,
@@ -266,15 +267,24 @@ def test_dep_006(ctx):
                       "deposits the button is not shown at all"):
             arch = rpc.call("sale.order", "get_view",
                             view_type="form")["arch"]
+            # Scoped to the BUTTON's own tag. Asserting that
+            # 'name="action_view_deposit"' and 'invisible="deposit_count == 0"'
+            # each appear somewhere in the sale.order form arch proves
+            # nothing about the button: the same guard is on deposit_total and
+            # on remaining_total two lines further down
+            # (sale_partner_deposit/views/sale_order_views.xml:22-27), so the
+            # assertion passed unchanged with the button's own invisible
+            # attribute deleted.
+            button_tag = button_attrs(arch, VIEW_DEPOSIT_METHOD)
+            ctx.log(f"Deposits smart button on the sale.order form: "
+                    f"{button_tag!r}")
             ctx.check_true(
                 "The Deposits button is hidden when the count is zero "
-                "(invisible=\"deposit_count == 0\")",
-                'name="action_view_deposit"' in arch
-                and 'invisible="deposit_count == 0"' in arch,
-                actual_desc=f"action_view_deposit in arch: "
-                            f"{'name=\"action_view_deposit\"' in arch}; "
-                            f"deposit_count==0 guard in arch: "
-                            f"{'invisible=\"deposit_count == 0\"' in arch}")
+                "(invisible=\"deposit_count == 0\" on the button itself)",
+                'invisible="deposit_count == 0"' in button_tag,
+                actual_desc=button_tag
+                            or (f"no <button name=\"{VIEW_DEPOSIT_METHOD}\"> "
+                                f"found in the sale.order form arch"))
             ctx.check("Order Z's deposit count, which is what hides the "
                       "button", 0,
                       order_totals(ctx, orders["Z"])["deposit_count"])

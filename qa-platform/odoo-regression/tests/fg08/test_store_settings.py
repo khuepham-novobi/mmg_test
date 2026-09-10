@@ -38,6 +38,9 @@ stays a human step. What the platform does instead:
    "a LIST with fewer rows … means rules were lost" shape).
 4. **Asserts Expected Result line 4 exactly as written.** It fails — see
    below.
+5. **Reports every gap in one pass.** Each check records its finding and the
+   case carries on; one hard assertion at the end decides the verdict — see
+   *Why the checks collect* below.
 
 Expected Result line 4 — the Salesperson field
 ----------------------------------------------
@@ -66,6 +69,25 @@ never inverted. This test therefore **fails on the shipped build**, and the
 log names both source locations so the fix is a one-line view change rather
 than an investigation.
 
+Why the checks collect rather than abort
+----------------------------------------
+That failure is real, and ``ctx.check`` raises. Until this pass the case
+therefore stopped at Expected Result line 4 — which sits ahead of the
+checks the workbook's own *If It Fails* column asks for, so on every
+recorded execution these had never run at all: the step-8 guard proof, "no
+configured many2one points at an archived or deleted record" across the 18
+routing fields, "no required sub-table came across empty", and the
+dropped-v15-fields assertion. A known, already-triaged product defect was
+hiding the P0 migration checks behind it.
+
+So every check goes through :func:`_audit` / :func:`_audit_true`, which
+record the failure and let the case carry on, and one hard ``ctx.check`` at
+the end asserts the collected list is empty. The verdict is unchanged — the
+Salesperson gap still FAILS this case, as rule 2 requires — and every
+assertion still carries its own expected-vs-actual, because
+``TestContext.check`` appends and emits before it raises. The shape is
+``tests/fg05/test_avatax_config.py``'s.
+
 Do NOT press anything — enforced, not remembered
 ------------------------------------------------
 Step 8: *"Do NOT press Reconnect, Refresh Locations or the Auto Import
@@ -81,6 +103,7 @@ which controls to keep away from on a store that is live (``active=True``,
 from __future__ import annotations
 
 from adapters.base import OdooRPCError
+from framework.context import AssertionFailed
 from framework.registry import test_case
 from tests.fg08.common import (ACTION_MANAGE_STORES, CHANNEL,
                                DROPPED_V15_FIELDS, EXPECTED_PAGES,
@@ -234,6 +257,48 @@ ROUTING_M2O = (
 )
 
 
+def _audit(ctx, findings, name, expected, actual):
+    """``ctx.check`` that records the gap and lets the case carry on.
+
+    TC-CHN-001 is a four-tab inventory review, and the workbook says to run
+    it FIRST because every later e-commerce case depends on its result. A
+    plain ``ctx.check`` raises on the first mismatch — and on the shipped
+    build the first mismatch is a KNOWN, already-triaged PRODUCT defect: the
+    Salesperson field restored on the model but placed on no view (Expected
+    Result line 4, below). That one gap aborted the case before the checks
+    the workbook's own *If It Fails* column asks for had run at all: the
+    step-8 guard proof, the archived-or-deleted many2one sweep over the 18
+    routing fields, the required-sub-table sweep, and the dropped-v15-fields
+    assertion. None of them had ever executed on a recorded run.
+
+    The assertion is still recorded in full: ``TestContext.check`` appends to
+    ``ctx.assertions`` and emits the ASSERTION event BEFORE it raises, so the
+    evidence keeps expected-vs-actual per line. Only the abort is deferred —
+    the collected findings are asserted together by one hard ``ctx.check`` at
+    the end, so the verdict is unchanged and the Salesperson gap still FAILS
+    this case.
+
+    ``ctx.blocked()`` / ``ctx.skip()`` raise ``BlockedTest`` / ``SkipTest``
+    and are deliberately NOT caught: a precondition that cannot be evaluated
+    must still stop the case. Same shape, and the same reasoning, as
+    ``tests/fg05/test_avatax_config.py``.
+    """
+    try:
+        ctx.check(name, expected, actual)
+    except AssertionFailed as exc:
+        findings.append(str(exc))
+        ctx.log(f"AUDIT FINDING — {exc}")
+
+
+def _audit_true(ctx, findings, name, condition, actual_desc=""):
+    """``ctx.check_true`` counterpart of :func:`_audit`."""
+    try:
+        ctx.check_true(name, condition, actual_desc=actual_desc)
+    except AssertionFailed as exc:
+        findings.append(str(exc))
+        ctx.log(f"AUDIT FINDING — {exc}")
+
+
 def _menu_group_field(ctx) -> str:
     """``ir.ui.menu``'s group field, resolved rather than assumed.
 
@@ -311,7 +376,10 @@ def _resolve_display(ctx, meta: dict, raw):
                 "archived or missing record, and no required sub-table came "
                 "across empty. Expected Result line 4 (Salesperson on the "
                 "Order Configuration tab) is asserted as written and FAILS: "
-                "the field was restored on the model but on no view.",
+                "the field was restored on the model but on no view. Every "
+                "check records its finding and the case carries on, with "
+                "one closing assertion deciding the verdict, so that known "
+                "failure no longer hides the checks behind it.",
     traceability=trace(
         "TC-CHN-001",
         user_story="As the E-commerce Manager I need every connector "
@@ -322,6 +390,7 @@ def test_chn_001(ctx):
     rpc = readonly_rpc(ctx)
     inventory_rows: list[list] = []
     list_counts: list[list] = []
+    findings: list[str] = []      # every gap, reported together at the end
 
     try:
         with ctx.step("Gate: Odoo 19 target, the e-commerce connector stack "
@@ -349,8 +418,9 @@ def test_chn_001(ctx):
                 menu_id = rpc.ref(xmlid)
                 menus[label] = menu_id
                 ctx.log(f"  menu {label!r} -> {xmlid} = {menu_id}")
-            ctx.check("Every level of the workbook's menu path exists", [],
-                      [label for label, mid in menus.items() if not mid])
+            _audit(ctx, findings,
+                   "Every level of the workbook's menu path exists", [],
+                   [label for label, mid in menus.items() if not mid])
 
             group_field = _menu_group_field(ctx)
             manage = rpc.read("ir.ui.menu", [menus["Manage Stores"]],
@@ -360,12 +430,13 @@ def test_chn_001(ctx):
             # Manage Stores straight off Configuration
             # (novobi-omni-addons/omni_manage_channel/views/
             # ecommerce_channel_views.xml:82).
-            ctx.check("'Manage Stores' hangs off 'Store Configuration' — the "
-                      "v19 menu level the workbook navigates",
-                      menus["Store Configuration"],
-                      m2o_id(manage.get("parent_id")))
+            _audit(ctx, findings,
+                   "'Manage Stores' hangs off 'Store Configuration' — the "
+                   "v19 menu level the workbook navigates",
+                   menus["Store Configuration"],
+                   m2o_id(manage.get("parent_id")))
             manager_group = rpc.ref(GROUP_MANAGER)
-            ctx.check_true(
+            _audit_true(ctx, findings,
                 "…and is restricted to the 'E-commerce Manager' group, "
                 "which is why the workbook's precondition names it",
                 manager_group in (manage.get(group_field) or []),
@@ -390,25 +461,28 @@ def test_chn_001(ctx):
             ctx.log(f"assembled form arch: {len(field_map)} distinct fields; "
                     f"pages={pages}")
 
-            ctx.check(
+            _audit(ctx, findings,
                 "The three notebook tabs the workbook walks exist, in its "
                 "order",
                 [name for name, _string in EXPECTED_PAGES],
                 [name for name, _string in pages])
-            ctx.check("…with the labels the workbook names",
-                      [string for _name, string in EXPECTED_PAGES],
-                      [string for _name, string in pages])
+            _audit(ctx, findings,
+                   "…with the labels the workbook names",
+                   [string for _name, string in EXPECTED_PAGES],
+                   [string for _name, string in pages])
 
             values = store_values(ctx, store_id)
-            ctx.check("Platform is Shopify", SHOPIFY, values.get("platform"))
-            ctx.check_true("Name is not empty", bool(values.get("name")),
-                           actual_desc=f"name={values.get('name')!r}")
+            _audit(ctx, findings,
+                   "Platform is Shopify", SHOPIFY, values.get("platform"))
+            _audit_true(ctx, findings,
+                        "Name is not empty", bool(values.get("name")),
+                        actual_desc=f"name={values.get('name')!r}")
 
             # "the store Name is read-only once the record has been saved"
             name_field = field_on_page(field_map, "name", HEADER) or {}
             name_readonly = str(name_field.get("readonly") or "").replace(
                 " ", "")
-            ctx.check_true(
+            _audit_true(ctx, findings,
                 "The workbook's warning holds: Name is read-only once the "
                 "record has been saved",
                 name_readonly == "write_date!=False",
@@ -422,7 +496,7 @@ def test_chn_001(ctx):
                                             HEADER) or {}
             platform_invisible = str(
                 platform_field.get("invisible") or "").replace(" ", "")
-            ctx.check_true(
+            _audit_true(ctx, findings,
                 "The workbook's warning holds: Platform is hidden "
                 "altogether on a saved store",
                 platform_invisible == "write_date!=False",
@@ -435,7 +509,7 @@ def test_chn_001(ctx):
             list_arch = view_arch(ctx, VIEW_STORE_LIST, "list")
             columns = list_columns(list_arch)
             ctx.log(f"Manage Stores list columns: {columns}")
-            ctx.check_true(
+            _audit_true(ctx, findings,
                 "…and the Manage Stores list carries the store logo the "
                 "workbook says to read the Platform from instead",
                 any(name == "logo_and_name" for name, _s, _w in columns),
@@ -456,8 +530,9 @@ def test_chn_001(ctx):
 
             company = values.get("company_id")
             company_field = visible_occurrence(field_map, "company_id") or {}
-            ctx.check_true("Company is set", bool(m2o_id(company)),
-                           actual_desc=f"company_id={company!r}")
+            _audit_true(ctx, findings,
+                        "Company is set", bool(m2o_id(company)),
+                        actual_desc=f"company_id={company!r}")
             observation(
                 ctx,
                 f"Company is only shown with the multi-company group "
@@ -469,7 +544,7 @@ def test_chn_001(ctx):
 
         with ctx.step("Step 3: Hostname is correct, and Access Token shows "
                       "as filled — the value never enters the evidence"):
-            ctx.check_true(
+            _audit_true(ctx, findings,
                 "Hostname is not empty",
                 bool(values.get("shopify_hostname")),
                 actual_desc=f"shopify_hostname="
@@ -480,7 +555,7 @@ def test_chn_001(ctx):
 
             token_field = field_on_page(field_map, "shopify_access_token",
                                          HEADER) or {}
-            ctx.check_true(
+            _audit_true(ctx, findings,
                 "Access Token is masked on the form, which is why the "
                 "workbook only asks whether it is filled",
                 str(token_field.get("password")) == "1",
@@ -494,8 +569,9 @@ def test_chn_001(ctx):
                           if not key.endswith("__length")}
             ctx.log(f"credential state (values deliberately not captured): "
                     f"{reportable}")
-            ctx.check("Access Token is not empty", "set",
-                      credentials.get("shopify_access_token"))
+            _audit(ctx, findings,
+                   "Access Token is not empty", "set",
+                   credentials.get("shopify_access_token"))
             token_meta_groups = (
                 channel_fields(ctx).get("shopify_access_token", {})
                 .get("groups"))
@@ -574,7 +650,7 @@ def test_chn_001(ctx):
 
             # Salesperson carries its own verdict below (Expected line 4),
             # so it is excluded here to keep the two readable.
-            ctx.check(
+            _audit(ctx, findings,
                 "Every field the workbook's steps 2-7 names — other than "
                 "Salesperson, which is asserted on its own below — is on "
                 "the tab it says",
@@ -603,9 +679,10 @@ def test_chn_001(ctx):
                     f"relation={salesperson_meta.get('relation')!r} — "
                     f"restored under FG11-D2 / BC-012 (multichannel_order/"
                     f"models/ecommerce_channel.py:44-61)")
-            ctx.check("Salesperson exists on the model, labelled as the "
-                      "workbook names it", "Salesperson",
-                      salesperson_meta.get("string"))
+            _audit(ctx, findings,
+                   "Salesperson exists on the model, labelled as the "
+                   "workbook names it", "Salesperson",
+                   salesperson_meta.get("string"))
 
             occurrences = field_map.get("user_id", {}).get("occurrences", [])
             finding(ctx,
@@ -621,14 +698,16 @@ def test_chn_001(ctx):
                     "the field cannot be read or set from the screen at "
                     "all, so 'carries the expected user' is unreachable for "
                     "the tester as well.")
-            ctx.check(
+            _audit(ctx, findings,
                 "Salesperson is present on the Order Configuration tab "
                 "(workbook Expected Result line 4)",
                 True,
                 bool(field_on_page(field_map, "user_id", PAGE_ORDER[0])))
-            # Only reached once the view is fixed; the second half of the
-            # line is then the real question.
-            ctx.check_true(
+            # The second half of the workbook's line. It is reached even
+            # while the first half fails (the checks collect), and on this
+            # build it fails too: a field on no view cannot be set from the
+            # screen, so the store's user_id is empty.
+            _audit_true(ctx, findings,
                 "…and carries a user ('carries the expected user')",
                 bool(m2o_id(values.get("user_id"))),
                 actual_desc=f"user_id={values.get('user_id')!r} "
@@ -647,7 +726,7 @@ def test_chn_001(ctx):
                         f"confirm={bool(button['confirm'])} "
                         f"groups={button['groups']!r}")
             names = {button["name"] for button in buttons}
-            ctx.check_true(
+            _audit_true(ctx, findings,
                 "The Reconnect / Refresh Locations / Auto Import controls "
                 "the workbook's step 8 forbids are on this screen, so the "
                 "tester knows what to keep away from",
@@ -677,7 +756,7 @@ def test_chn_001(ctx):
                     refused.append(method)
                 except Exception as exc:            # noqa: BLE001
                     refused.append(f"{method} (REACHED ODOO: {exc})")
-            ctx.check(
+            _audit(ctx, findings,
                 "This suite is structurally unable to press them: every one "
                 "is refused by ReadOnlyRPC before it reaches Odoo",
                 list(GUARD_PROBE), refused)
@@ -702,11 +781,13 @@ def test_chn_001(ctx):
                     archived.append(
                         f"{field_name} -> {comodel}#{target} "
                         f"{rows[0].get('display_name')!r} is ARCHIVED")
-            ctx.check("No configured setting points at a record that no "
-                      "longer exists", [], dangling)
-            ctx.check("No configured setting points at an ARCHIVED record — "
-                      "the workbook's 'will silently mis-route real orders' "
-                      "shape", [], archived)
+            _audit(ctx, findings,
+                   "No configured setting points at a record that no "
+                   "longer exists", [], dangling)
+            _audit(ctx, findings,
+                   "No configured setting points at an ARCHIVED record — "
+                   "the workbook's 'will silently mis-route real orders' "
+                   "shape", [], archived)
 
         with ctx.step("If It Fails, shape 2: no list this configuration "
                       "requires came across empty"):
@@ -745,13 +826,14 @@ def test_chn_001(ctx):
             for name, reason in required_lists:
                 ctx.log(f"  {name}: {len(values.get(name) or [])} row(s) — "
                         f"{reason}")
-            ctx.check("Every list this configuration requires has at least "
-                      "one row", [],
-                      [f"{name}: {reason}" for name, reason in required_lists
-                       if not (values.get(name) or [])])
+            _audit(ctx, findings,
+                   "Every list this configuration requires has at least "
+                   "one row", [],
+                   [f"{name}: {reason}" for name, reason in required_lists
+                    if not (values.get(name) or [])])
 
             include_rows = values.get("include_inventory_sync_ids") or []
-            ctx.check_true(
+            _audit_true(ctx, findings,
                 "Inventory Export Rules is not empty — a store created by "
                 "the module gets one global 100% rule by default, so an "
                 "empty list on a migrated store means rules were lost",
@@ -765,7 +847,7 @@ def test_chn_001(ctx):
         with ctx.step("Briefing the tester: what is gone or renamed since "
                       "v15, so a printout comparison does not report it as "
                       "a loss"):
-            ctx.check(
+            _audit(ctx, findings,
                 "The four v15 fields the port drops on purpose are still "
                 "gone (oauth_version, state, is_in_syncing, "
                 "last_option_sync_product) — re-adding one without a "
@@ -791,6 +873,30 @@ def test_chn_001(ctx):
                     "payment_method_line_id (multichannel_order/views/"
                     "omnichannel_dashboard_views.xml:147-153, against v15's "
                     "…:113-120)")
+
+        # One verdict for the whole case. Each gap above was recorded as
+        # its own assertion as it happened — ctx.check appends to
+        # ctx.assertions and emits the ASSERTION event BEFORE it raises — so
+        # the evidence keeps expected-vs-actual per line while the run still
+        # reaches every step. That matters here more than anywhere: the
+        # Salesperson gap is a real product defect that fails on every
+        # execution, and while it aborted the case the P0 migration checks
+        # behind it never ran at all.
+        with ctx.step("Audit summary: every gap this case found, reported "
+                      "together"):
+            if findings:
+                ctx.log(f"{len(findings)} finding(s). The Salesperson view "
+                        f"gap is expected on the shipped build "
+                        f"(reports/data/fg08_feasibility.json, key "
+                        f"_finding_salesperson); anything else listed here "
+                        f"is new and needs triage:")
+                for number, text in enumerate(findings, 1):
+                    ctx.log(f"  {number}. {text}")
+            # HARD check: the one that decides the verdict. The Salesperson
+            # gap still FAILS this case through it — it is a product defect
+            # and must keep being detected; it simply no longer hides the
+            # checks behind it.
+            ctx.check("TC-CHN-001 findings", [], findings)
 
     finally:
         write_csv(ctx, "TC-CHN-001-store-settings-inventory.csv",

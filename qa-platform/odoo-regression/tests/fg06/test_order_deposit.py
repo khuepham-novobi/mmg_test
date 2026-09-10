@@ -78,8 +78,8 @@ from framework.registry import test_case
 from tests.fg06.common import (CUSTOMER_SIDE, MODULE_SALE, OPTION_FIXED,
                                OPTION_PERCENTAGE, WORKFLOW, WORKFLOW_NAME,
                                acting_company, cleanup, deposit_popup_state,
-                               deposit_accounts_for_test, make_order,
-                               make_partner, make_product, money,
+                               deposit_accounts_for_test, field_attrs,
+                               make_order, make_partner, make_product, money,
                                open_make_deposit_wizard, order_totals,
                                payment_row, require_sale_deposit,
                                run_make_deposit_wizard, sweep_fg06, trace,
@@ -248,13 +248,31 @@ def test_dep_004(ctx):
             popup_arch = rpc.call("account.payment", "get_view",
                                   view_id=popup_view_id,
                                   view_type="form")["arch"]
+            # Scoped to the field's OWN tag. Asserting that 'name="partner_id"'
+            # and 'readonly="1"' each appear SOMEWHERE in the arch proves
+            # nothing: both strings occur many times over in a payment form,
+            # so the assertion passed unchanged with the module's
+            #   <xpath expr="//field[@name='partner_id'][1]"
+            #          position="attributes">
+            #       <attribute name="readonly">1</attribute>
+            # deleted (views/account_payment_deposit_view.xml:143-148). What
+            # the workbook expects — "the Customer is filled in and cannot be
+            # changed" — is an attribute ON that field, so the field's tag is
+            # what is read.
+            partner_tag = field_attrs(popup_arch, "partner_id")
+            occurrences = popup_arch.count('name="partner_id"')
+            ctx.log(f"partner_id on the from-order pop-up ({occurrences} "
+                    f"occurrence(s) in the combined arch; v19's "
+                    f"view_account_payment_form carries the Customer and "
+                    f"Vendor pair at addons/account/views/"
+                    f"account_payment_view.xml:253,257 and the module makes "
+                    f"both readonly): {partner_tag!r}")
             ctx.check_true(
                 "Customer is read-only on the payment pop-up",
-                'name="partner_id"' in popup_arch
-                and 'readonly="1"' in popup_arch,
-                actual_desc="partner_id readonly=\"1\" present in the "
-                            "from-order arch: "
-                            f"{'readonly=\"1\"' in popup_arch}")
+                'readonly="1"' in partner_tag,
+                actual_desc=partner_tag
+                            or "no <field name=\"partner_id\"> found in the "
+                               "from-order arch")
 
         with ctx.step("Steps 8-9 / Expected line 4: Total Deposit 3,000.00 "
                       "and Net Total 7,000.00 on the order"):

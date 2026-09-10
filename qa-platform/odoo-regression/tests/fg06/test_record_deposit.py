@@ -75,28 +75,52 @@ Two mechanisms could restrict it, and only one is real:
 * the real restriction is ``account.payment.available_journal_ids``, computed
   over journals of type ``('bank', 'cash', 'credit')`` that carry a matching
   payment method line
-  (``addons/account/models/account_payment.py:593-608``).
+  (``addons/account/models/account_payment.py:594-608``).
 
 So the workbook's expectation is asserted against ``available_journal_ids``,
 which is what the field's dropdown is actually bound to. Note that v19
-includes **credit**-type journals in that computation. On a database that has
-one with an inbound payment method, this assertion will FAIL — correctly, and
-as a real finding: the guideline states bank and cash only. The log names the
-offending journals and the source line so the accountant can decide whether
-to accept v19's wider list or have the field's domain narrowed.
+includes **credit**-type journals in that computation
+(``addons/account/models/account_payment.py:594-608`` searches ``type in
+('bank', 'cash', 'credit')``).
+
+That widening is stock Odoo 19, not an MMG change: nothing in
+``account_partner_deposit`` narrows the list, and no v19 Python reads the
+deposit action's ``default_move_journal_types`` context key. A company that
+happens to own a credit-type journal carrying an inbound payment-method line
+therefore sees a third journal type offered on the deposit form — a condition
+MMG neither causes nor can fix from this module. Failing the case on it would
+put a stock-version divergence in the defect column of an upgrade report and
+send the team looking for an MMG bug that does not exist. It is reported the
+way this suite reports every other stock-v19 divergence: the offending
+journals, the source line and the decision are logged as a FINDING and a
+RESIDUAL MANUAL STEP for the Accounting Manager (accept v19's wider list, or
+have the field's domain narrowed to bank/cash), and the assertion holds the
+line that is genuinely MMG's to keep — **no journal outside v19's own
+bank/cash/credit set is ever offered on a deposit**. Nothing that could
+indicate a real defect is dropped: a journal of any other type in that list
+would mean the module or the data broke the computation, and that still
+FAILS.
+
+A coverage note — ``res.partner.total_deposit``
+-----------------------------------------------
+The contact-side reading of a deposit is asserted here too, at the end of the
+case, because nothing else in FG-06 reads it. See the step's own comment for
+why it is the assertion that anchors the ``aml.blocked`` defect.
 """
 from __future__ import annotations
 
-import re
-
+from adapters.base import OdooRPCError
+from framework.context import AssertionFailed
 from framework.registry import test_case
 from tests.fg06.common import (CUSTOMER_SIDE, DEPOSIT_ACCOUNT_FIELD, MODULE,
                                PAYMENT_STATES, PAYMENT_STATUSBAR, WORKFLOW,
                                WORKFLOW_NAME, account_row, acting_company,
                                cleanup, deposit_accounts_for_test,
-                               form_defaults, m2o_id, make_deposit,
-                               make_partner, move_lines, onchange_values,
-                               payment_row, require_v19, sweep_fg06, trace,
+                               field_attrs, fields_present,
+                               form_defaults, m2o_id,
+                               make_deposit, make_partner, money, move_lines,
+                               onchange_values, payment_row, require_v19,
+                               residual_manual_step, sweep_fg06, trace,
                                x2m_ids)
 
 # Workbook Test Data.
@@ -110,22 +134,15 @@ DEPOSIT_FORM_XMLID = "account_partner_deposit.view_account_payment_deposit_form"
 
 # Journal types the workbook expects the Journal field to offer.
 EXPECTED_JOURNAL_TYPES = {"bank", "cash"}
+# Journal types v19 itself computes into account.payment.available_journal_ids
+# (addons/account/models/account_payment.py:594-608). Anything OUTSIDE this set
+# would mean the computation was broken by the module or by the data, which is
+# the half of workbook step 6 that is MMG's to keep.
+V19_JOURNAL_TYPES = {"bank", "cash", "credit"}
 
 # Account types that would mean the money landed in the wrong place.
 REVENUE_TYPES = ("income", "income_other")
 LIQUIDITY_TYPES = ("asset_cash", "liability_credit_card")
-
-
-def _field_attrs(arch: str, field_name: str) -> str:
-    """The raw ``<field name="…" …/>`` tag for one field in a view arch.
-
-    A string search rather than an XML parse: what is being asserted is that
-    a specific attribute expression is present on that field, and the tag
-    text is the most faithful evidence to put in front of a reviewer.
-    """
-    match = re.search(rf'<field[^>]*name="{re.escape(field_name)}"[^>]*/?>',
-                      arch)
-    return match.group(0) if match else ""
 
 
 @test_case(
@@ -139,9 +156,12 @@ def _field_attrs(arch: str, field_name: str) -> str:
     order=603,
     description="The deposit form hides Payment Type, shows a required "
                 "Deposit Account that fills itself in from the contact, and "
-                "offers only bank/cash journals; a 2,500.00 deposit starts "
-                "unposted, confirms, and books one liquidity line and one "
-                "line on the Deposit Account — never on revenue.",
+                "offers no journal outside v19's own bank/cash/credit set "
+                "(any credit journal is reported as a stock-v19 finding, not "
+                "a defect); a 2,500.00 deposit starts unposted, confirms, and "
+                "books one liquidity line and one line on the Deposit Account "
+                "— never on revenue — and the contact then reads that same "
+                "2,500.00 as its open deposit line and Total Deposit.",
     traceability=trace("TC-DEP-001"))
 def test_dep_001(ctx):
     rpc = ctx.adapter.rpc
@@ -186,7 +206,7 @@ def test_dep_001(ctx):
                 actual_desc=f"ir.model.data -> view id {view_id!r}")
             arch = rpc.call("account.payment", "get_view", view_id=view_id,
                             view_type="form")["arch"]
-            payment_type_tag = _field_attrs(arch, "payment_type")
+            payment_type_tag = field_attrs(arch, "payment_type")
             ctx.log(f"payment_type on the deposit form: {payment_type_tag!r}")
             # The deposit is always incoming, so the radio is suppressed
             # rather than defaulted (views/account_payment_deposit_view.xml:
@@ -202,7 +222,7 @@ def test_dep_001(ctx):
                       "conditional on the deposit being a customer one, and "
                       "is REQUIRED"):
             field_name = DEPOSIT_ACCOUNT_FIELD[CUSTOMER_SIDE]
-            tag = _field_attrs(arch, field_name)
+            tag = field_attrs(arch, field_name)
             ctx.log(f"{field_name} on the deposit form: {tag!r}")
             ctx.check_true(
                 "Deposit Account is hidden unless this is a customer deposit "
@@ -248,8 +268,9 @@ def test_dep_001(ctx):
                       "Deposit Account", account["id"],
                       m2o_id(after.get(DEPOSIT_ACCOUNT_FIELD[CUSTOMER_SIDE])))
 
-        with ctx.step("Step 6 (adapted) / the Journal field offers only bank "
-                      "and cash journals"):
+        with ctx.step("Step 6 (adapted) / the Journal field offers no journal "
+                      "outside v19's own bank/cash/credit set — any credit "
+                      "journal is reported as a stock-v19 finding"):
             # available_journal_ids is what the dropdown is bound to; the
             # action's default_move_journal_types context key is inert in v19
             # (module docstring).
@@ -260,26 +281,56 @@ def test_dep_001(ctx):
                 ["name", "code", "type"], order="type") if available else []
             ctx.log(f"Journal field offers: "
                     f"{[(j['code'], j['type']) for j in offered]}")
-            wrong = sorted({j["type"] for j in offered}
+            # Two different things are being separated here.
+            #
+            # (a) A journal type the WORKBOOK does not allow but v19 itself
+            #     computes — in practice 'credit'. Stock v19 behaviour, not an
+            #     MMG change: _compute_available_journal_ids searches
+            #     type in ('bank', 'cash', 'credit')
+            #     (addons/account/models/account_payment.py:594-608), nothing
+            #     in account_partner_deposit narrows it, and the deposit
+            #     action's own default_move_journal_types: ('bank', 'cash')
+            #     context key is read by no v19 Python
+            #     (account_partner_deposit/PORTING.md, 'Report correction').
+            #     MMG neither causes this nor can fix it from this module, so
+            #     failing the case would file a stock-version divergence as an
+            #     MMG defect. Reported as a FINDING and a decision for the
+            #     Accounting Manager instead.
+            #
+            # (b) A journal type OUTSIDE v19's own set. That cannot come from
+            #     stock behaviour at all — it would mean the computation or
+            #     the payment-method data is broken — and it is asserted hard.
+            wider = sorted({j["type"] for j in offered}
                            - EXPECTED_JOURNAL_TYPES)
-            if wrong:
+            if wider:
                 ctx.log(
                     f"FINDING — the Journal field also offers journal type(s) "
-                    f"{wrong}, which the workbook does not allow. This is v19 "
+                    f"{wider}, which the workbook does not allow. This is v19 "
                     f"stock behaviour, not an MMG change: "
                     f"account.payment._compute_available_journal_ids searches "
                     f"type in ('bank', 'cash', 'credit') "
-                    f"(addons/account/models/account_payment.py:593-608), and "
+                    f"(addons/account/models/account_payment.py:594-608), and "
                     f"the deposit action's own "
                     f"default_move_journal_types: ('bank', 'cash') context key "
                     f"is read by no Python in v19 "
                     f"(account_partner_deposit/PORTING.md, 'Report "
                     f"correction'). Offending journals: "
-                    f"{[(j['code'], j['type']) for j in offered if j['type'] in wrong]}. "
-                    f"Decision for the Accounting Manager: accept v19's wider "
-                    f"list, or have the field's domain narrowed to bank/cash.")
-            ctx.check("Journal types the Journal field offers on a deposit",
-                      [], wrong)
+                    f"{[(j['code'], j['type']) for j in offered if j['type'] in wider]}.")
+                residual_manual_step(
+                    ctx,
+                    f"workbook step 6 says the Journal field offers bank and "
+                    f"cash only; on this company v19 also offers "
+                    f"{[(j['code'], j['type']) for j in offered if j['type'] in wider]}. "
+                    f"DECISION FOR THE ACCOUNTING MANAGER: accept v19's wider "
+                    f"list (no code change; the deposit still posts to the "
+                    f"journal the user picks), or have "
+                    f"account_partner_deposit narrow the field's domain to "
+                    f"bank/cash. This is a stock-Odoo-19 difference, not an "
+                    f"MMG regression — do NOT raise it as a module defect.")
+            outside = sorted({j["type"] for j in offered} - V19_JOURNAL_TYPES)
+            ctx.check("No journal outside v19's own bank/cash/credit set is "
+                      "offered on a deposit (addons/account/models/"
+                      "account_payment.py:594-608)", [], outside)
 
         with ctx.step("Steps 5 and 7 / Expected line 3: save the 2,500.00 "
                       "deposit — it is not yet confirmed"):
@@ -293,7 +344,7 @@ def test_dep_001(ctx):
             ctx.check("Memo on the saved deposit", DEPOSIT_MEMO,
                       saved["memo"])
             # The status bar's own definition, from the view.
-            statusbar = _field_attrs(
+            statusbar = field_attrs(
                 rpc.call("account.payment", "get_view", view_id=view_id,
                          view_type="form")["arch"], "state")
             ctx.log(f"state widget on the deposit form: {statusbar!r}")
@@ -395,6 +446,120 @@ def test_dep_001(ctx):
                       "as the deposit-account domain requires",
                       "liability_current",
                       account_row(ctx, account["id"])["account_type"])
+
+        with ctx.step("Coverage: the same 2,500.00 read from the CONTACT — "
+                      "res.partner.customer_deposit_aml_ids and Total "
+                      "Deposit"):
+            # Why this step exists, and why it is here rather than in a case
+            # of its own.
+            #
+            # account_partner_deposit/models/res_partner.py:57-63 computes
+            # total_deposit by walking customer_deposit_aml_ids and testing
+            #   `if aml.company_id == self.env.company and not aml.blocked`
+            # — and `account.move.line.blocked` DOES NOT EXIST in Odoo 19. It
+            # was v15's "No Follow-up" boolean (v15 addons/account/models/
+            # account_move.py:3707); v19 keeps only account.move.payment_state
+            # == 'blocked', which is a different thing on a different model.
+            # The port dropped the follow-up integration that used to display
+            # this field (BC-015) but left the compute reading the removed
+            # name, so any read of total_deposit on a contact that HAS at
+            # least one open deposit line raises.
+            #
+            # Until now nothing in FG-06 read either field, so that defect had
+            # no automated detector anywhere in the platform — while the
+            # recorded TC-DEP-001 / TC-DEP-009 failures had been attributed to
+            # it. This is the assertion that makes the attribution real: it
+            # runs on a contact that has just been given a confirmed deposit,
+            # which is precisely the state in which the loop body executes
+            # (an empty recordset never evaluates `aml.blocked`, and the
+            # `company_id ==` term short-circuits before it for another
+            # company's line).
+            coverage_findings = []
+            partner_context = {"allowed_company_ids": [company["id"]],
+                               "company_id": company["id"]}
+            partner_fields = fields_present(
+                rpc, "res.partner",
+                ["customer_deposit_aml_ids", "total_deposit"])
+
+            if "customer_deposit_aml_ids" in partner_fields:
+                open_lines = rpc.call(
+                    "res.partner", "read", [partner_id],
+                    fields=["customer_deposit_aml_ids"],
+                    context=partner_context)[0].get(
+                        "customer_deposit_aml_ids") or []
+                ctx.log(f"customer_deposit_aml_ids on the contact: "
+                        f"{open_lines}")
+                # Deferred: this is the SECOND-most important claim in the
+                # step. The total_deposit read below is the one that anchors
+                # the confirmed product defect (account_partner_deposit
+                # res_partner.py:61 reads aml.blocked, removed in v19), and a
+                # raising ctx.check here would abort before it ever runs —
+                # reintroducing exactly the first-failure-abort flaw this
+                # suite was just fixed for. Both are asserted; only the abort
+                # is deferred, and the closing check below decides the verdict.
+                try:
+                    ctx.check(
+                        "The confirmed deposit leaves exactly the Deposit "
+                        "Account line open on the contact "
+                        "(res.partner.customer_deposit_aml_ids)",
+                        sorted(line["id"] for line in deposit_lines),
+                        sorted(open_lines))
+                except AssertionFailed as exc:
+                    coverage_findings.append(str(exc))
+                    ctx.log(f"FINDING — {exc}")
+            else:
+                ctx.log("res.partner.customer_deposit_aml_ids is not readable "
+                        "by the runner user — the open-line half of this step "
+                        "could not be evaluated")
+
+            if "total_deposit" in partner_fields:
+                total, error = None, ""
+                try:
+                    total = money(rpc.call(
+                        "res.partner", "read", [partner_id],
+                        fields=["total_deposit"],
+                        context=partner_context)[0].get("total_deposit"))
+                except OdooRPCError as exc:
+                    error = str(exc)
+                    ctx.log(
+                        f"FINDING (PRODUCT DEFECT) — reading "
+                        f"res.partner.total_deposit for a contact that holds "
+                        f"a deposit raised: {error}. Cause: "
+                        f"account_partner_deposit/models/res_partner.py:61 "
+                        f"still reads aml.blocked, a field Odoo 19 removed "
+                        f"from account.move.line (v15 addons/account/models/"
+                        f"account_move.py:3707, 'No Follow-up'). The fix is "
+                        f"to drop the term — v19 has no per-line follow-up "
+                        f"block, and the module no longer ships the "
+                        f"follow-up report that used it (BC-015).")
+                # Fails with the RPC error as the ACTUAL value, so the report
+                # names the product defect instead of recording an automation
+                # error.
+                ctx.check("Total Deposit on the contact "
+                          "(res.partner.total_deposit)",
+                          DEPOSIT_AMOUNT, error or total)
+            else:
+                ctx.log(
+                    "res.partner.total_deposit is not readable by the runner "
+                    "user: it carries groups='account.group_account_readonly,"
+                    "account.group_account_invoice' "
+                    "(account_partner_deposit/models/res_partner.py:50-53), "
+                    "so fields_get omits it and a value that cannot be read "
+                    "cannot be checked.")
+                residual_manual_step(
+                    ctx,
+                    "res.partner.total_deposit could not be read by the "
+                    "runner user (missing account.group_account_readonly / "
+                    "account.group_account_invoice). Open the contact as an "
+                    "accounting user and confirm Total Deposit reads "
+                    f"{DEPOSIT_AMOUNT:.2f}: the compute reads aml.blocked, a "
+                    "field Odoo 19 removed, so it is expected to raise.")
+
+            # Closing hard check: the deferred open-lines mismatch above still
+            # decides the verdict, but only after the total_deposit read has
+            # had its chance to run.
+            ctx.check("Contact-side deposit coverage findings", [],
+                      coverage_findings)
     finally:
         with ctx.step("Cleanup: remove FG06 fixtures (the CONFIRMED deposit "
                       "is left in place — the workbook's State After The Test "

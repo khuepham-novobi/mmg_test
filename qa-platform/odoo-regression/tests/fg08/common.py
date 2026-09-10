@@ -89,7 +89,7 @@ import ast
 import csv
 import re
 import xml.etree.ElementTree as ET
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from adapters.base import OdooRPCError
 
@@ -323,7 +323,9 @@ def observation(ctx, text: str):
 def finding(ctx, text: str):
     """A divergence between the workbook and the shipped v19 build, found
     while writing the assertions. Not a test defect and not silently
-    absorbed — see docs/FG-08_MANUAL_GUIDELINE_SUITE.md section 6."""
+    absorbed — see reports/data/fg08_feasibility.json, keys
+    ``_finding_salesperson`` / ``_finding_card_readings`` /
+    ``_finding_period_write``."""
     ctx.log(f"FINDING — {text}")
 
 
@@ -648,6 +650,48 @@ def require_manager_group(ctx):
     return True
 
 
+def require_user_group(ctx):
+    """TC-CHN-011's own precondition, asserted rather than assumed.
+
+    The workbook's precondition for the Overview case is *"you have the
+    'E-commerce User' group at least"* — not the Manager group TC-CHN-001
+    needs, and the menus agree. The Overview menu carries no ``groups`` of
+    its own and hangs off a root restricted to ``group_listing_user``;
+    *Manage Stores* is the one restricted to ``group_listing_manager``
+    (``omni_manage_channel/views/ecommerce_channel_views.xml:4-6, 23-24,
+    82-84``). TC-CHN-011 reads no group-restricted field — it never calls
+    :func:`secret_state` — so demanding Manager here would report a
+    correctly-provisioned E-commerce User as BLOCKED against a screen they
+    are entitled to open.
+
+    A Manager still passes: ``group_listing_manager`` implies
+    ``group_listing_user``
+    (``omni_manage_channel/security/listing_channel_security.xml:44-49``)
+    and ``has_group`` resolves through ``all_group_ids``
+    (``odoo/addons/base/models/res_users.py:1085-1096``).
+    """
+    rpc = readonly_rpc(ctx)
+    try:
+        is_user = rpc.call("res.users", "has_group", [rpc.uid], GROUP_USER)
+    except OdooRPCError as exc:
+        ctx.log(f"[warn] has_group({GROUP_USER}) failed ({exc}) — "
+                f"continuing; this case reads no group-restricted field, so "
+                f"a wrong group shows up as an empty screen rather than as "
+                f"a wrong value")
+        return None
+    if not is_user:
+        ctx.blocked(
+            f"the RPC user (uid {rpc.uid}) is not in '{GROUP_USER}' "
+            f"(E-commerce User). That is the workbook's own precondition "
+            f"for this case — without it the 'E-commerce Connectors' menu "
+            f"does not appear at all (omni_manage_channel/views/"
+            f"ecommerce_channel_views.xml:4-6). Add the group to the user "
+            f"named in config/local.yaml.")
+    ctx.log(f"RPC user uid {rpc.uid} is in {GROUP_USER} — the workbook's "
+            f"'E-commerce User at least' precondition is met")
+    return True
+
+
 # --------------------------------------------------------------- the store
 def store_domain(ctx, action: dict, include_inactive=True) -> list:
     """The domain the Manage Stores / Overview screen itself applies.
@@ -836,6 +880,14 @@ def server_now(ctx):
     ``res.users.login_date`` is related to that row's ``create_date``
     (``res_users.py:233``). So the current user's ``login_date`` *is* the
     server clock, to within the age of this run.
+
+    Which clock, precisely: **UTC**. ``create_date`` is stamped from the
+    cursor's ``now() AT TIME ZONE 'UTC'`` (``odoo/sql_db.py:272-274``), so
+    what comes back here is UTC and *not* the wall clock of the machine the
+    Odoo process runs on. For TC-CHN-005's "is not today's date" the two
+    disagree only on the hours either side of local midnight; for the
+    dashboard window it is load-bearing every day — see
+    :func:`window_start_candidates`.
     """
     rpc = readonly_rpc(ctx)
     try:
@@ -877,8 +929,8 @@ def as_date(raw):
     return parsed.date() if isinstance(parsed, datetime) else None
 
 
-def window_start(now: datetime, days: int) -> datetime:
-    """The window the dashboard queries.
+def window_start(now_utc: datetime, days: int) -> datetime:
+    """The window the dashboard queries, rebuilt from a UTC clock.
 
     Both producers use ``datetime.now().replace(hour=0, minute=0,
     second=0) - timedelta(days=delta)``
@@ -893,9 +945,52 @@ def window_start(now: datetime, days: int) -> datetime:
     sliver would be counted here and not there; the recomputation logs the
     boundary it used so such a one-order disagreement can be recognised for
     what it is rather than read as a defect.
+
+    That sliver is the SMALL discrepancy. The large one is the timezone:
+    this rebuilds the boundary from UTC while the product builds it from
+    the Odoo process's local clock. Any comparison against a figure the
+    product produced must go through :func:`window_start_candidates`.
     """
-    from datetime import timedelta
-    return now.replace(hour=0, minute=0, second=0) - timedelta(days=days)
+    return now_utc.replace(hour=0, minute=0, second=0) - timedelta(days=days)
+
+
+def window_start_candidates(now_utc: datetime, days: int) -> list:
+    """Every boundary the card's query could be using, given that the
+    server's own timezone is not readable. ``[(label, boundary, shift)]``.
+
+    ``_get_dashboard_datas_query`` takes its boundary from
+    ``datetime.now()`` — a NAIVE local timestamp, i.e. the wall clock of
+    the machine the Odoo process runs on (``multichannel_order/models/
+    ecommerce_channel.py:229``; ``get_graph_datas`` does the same at
+    ``:292``). :func:`server_now` returns ``res.users.login_date``, which
+    is ``res.users.log.create_date``, stamped ``now() AT TIME ZONE 'UTC'``
+    (``odoo/sql_db.py:272-274``). On a server that does not run in UTC the
+    two differ by the UTC offset — and because the expression zeroes the
+    time before subtracting, they differ by a WHOLE DAY of orders for as
+    many hours of each day as that offset is wide.
+
+    Nothing this suite may call reports that local clock: ``ReadOnlyRPC``
+    allows reads only, ``res.users.context_get`` returns the *user's* tz
+    preference rather than the server's, and ``ctx.sql`` would report
+    BLOCKED wherever it is unconfigured — and would be the PostgreSQL
+    host's clock, not the Odoo host's, even where it is configured. So the
+    offset is not measured; it is bounded. Real UTC offsets run from -12:00
+    to +14:00, so the server's local date is the UTC date, the day before,
+    or the day after. All three boundaries are returned so a caller can
+    compare a product figure against the resulting envelope rather than
+    against one guess. Where the three windows hold the same orders the
+    envelope collapses and the comparison is exact, which is the normal
+    case; where they do not, a timezone difference is reported as one
+    instead of being triaged as a GATE-6 product defect.
+    """
+    return [
+        (label, window_start(now_utc + timedelta(days=shift), days), shift)
+        for shift, label in (
+            (-1, "server clock a day BEHIND UTC"),
+            (0, "server clock on the same date as UTC"),
+            (1, "server clock a day AHEAD of UTC"),
+        )
+    ]
 
 
 # ---------------------------------------------------- dashboard payloads

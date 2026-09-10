@@ -200,6 +200,53 @@ NO_BANK_JOURNAL = (
     "itself a migration finding, because the v15 database certainly had one"
 )
 
+# The Many2one Odoo 19 dereferences for the payment reference of a MULTI-move
+# customer payment. Empty on this migrated database, which is the whole of the
+# defect described in NO_BATCH_PAYMENT_SEQUENCE below.
+BATCH_SEQUENCE_FIELD = "batch_payment_sequence_id"
+
+NO_BATCH_PAYMENT_SEQUENCE = (
+    "DATABASE-STATE DEFECT — this is a real finding about the migrated "
+    "database, NOT a broken test and NOT a code change. "
+    "res.company.batch_payment_sequence_id is NOT SET on the acting company, "
+    "and Odoo 19 dereferences it the moment a customer pays TWO OR MORE "
+    "invoices at once — which is precisely what TC-INV-008 does. "
+    "account.payment.register._get_communication falls through to "
+    "company.get_next_batch_payment_communication() whenever the selection "
+    "spans more than one inbound move (addons/account/wizard/"
+    "account_payment_register.py:176-190), and that method calls "
+    ".next_by_id() on the EMPTY ir.sequence recordset "
+    "(addons/account/models/company.py:303-309). ir.sequence._next_do then "
+    "issues 'SELECT number_next FROM ir_sequence WHERE id=%s FOR UPDATE "
+    "NOWAIT' with id=False (odoo/addons/base/models/ir_sequence.py:58-64, "
+    ":200-205), which PostgreSQL rejects with a type error. The Pay pop-up "
+    "therefore RAISES before it can even be read, for EVERY multi-invoice "
+    "customer payment on this database. "
+    "CAUSE: the sequence is created by the 'account' module's post-init hook "
+    "_create_batch_payment_sequence (addons/account/__init__.py:13-24). A "
+    "post-init hook does not run on an upgraded database, so the column "
+    "stayed NULL across the v15 -> v19 migration. "
+    "REMEDY: run "
+    "env['res.company'].search([('batch_payment_sequence_id','=',False)])"
+    "._create_batch_payment_sequence() once per database (or force an upgrade "
+    "of the 'account' module so the hook fires), then re-run this case. Every "
+    "company on the database needs it, not only the acting one"
+)
+
+
+def _is_batch_sequence_error(exc) -> bool:
+    """Is this RPC failure the NULL-batch_payment_sequence_id crash?
+
+    Matched on the SQL and the field names in the server traceback rather
+    than on the PostgreSQL message text, which is localised and differs
+    between server versions. Deliberately narrow: anything that is NOT this
+    defect must keep its own verdict rather than being relabelled as it.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in
+               ("batch_payment_sequence", "get_next_batch_payment_communication",
+                "ir_sequence", "number_next"))
+
 
 def _popup(ctx, wizard_id: int) -> dict:
     """Read the Pay pop-up as the tester reads it in workbook step 3.
@@ -366,6 +413,37 @@ def test_inv_008(ctx):
                 + ", ".join(f"{j['code']} {j['name']!r} ({j['type']})"
                             for j in journals))
 
+        # The Pay pop-up dereferences res.company.batch_payment_sequence_id
+        # for EVERY selection of two or more customer invoices — which is the
+        # whole of this case. Probed HERE, before a single fixture exists, so
+        # that a NULL column is reported as the database-state defect it is,
+        # with its cause and its one-line remedy, instead of surfacing three
+        # steps later as an opaque AUTOMATION_ERROR out of a PostgreSQL type
+        # error that names neither.
+        if BATCH_SEQUENCE_FIELD in fields_present(rpc, "res.company",
+                                                  [BATCH_SEQUENCE_FIELD]):
+            sequence = rpc.read("res.company", [company["id"]],
+                                [BATCH_SEQUENCE_FIELD])[0].get(
+                                    BATCH_SEQUENCE_FIELD)
+            ctx.log(f"res.company.{BATCH_SEQUENCE_FIELD} on company "
+                    f"#{company['id']}: "
+                    f"{m2o_name(sequence) or 'NOT SET'} "
+                    f"(id {m2o_id(sequence) or 'NULL'})")
+            if not m2o_id(sequence):
+                finding(ctx, f"res.company.{BATCH_SEQUENCE_FIELD} is NULL on "
+                             f"company #{company['id']} "
+                             f"{company['name']!r}. Paying two or more "
+                             f"customer invoices at once is IMPOSSIBLE on "
+                             f"this database until it is populated — see the "
+                             f"BLOCKED reason for the mechanism and the fix")
+                ctx.blocked(NO_BATCH_PAYMENT_SEQUENCE)
+        else:
+            ctx.log(f"res.company has no {BATCH_SEQUENCE_FIELD} field "
+                    f"readable by this user, so the multi-move payment "
+                    f"reference cannot be probed up front; a failure inside "
+                    f"the Pay pop-up below is diagnosed against the same "
+                    f"cause")
+
         # The workbook's precondition is "TC-INV-006 has passed", i.e. the MMG
         # default-payment-journal override is live. It changes WHICH journal
         # the pop-up preselects (mmg_default_payment_journal/wizards/
@@ -415,9 +493,19 @@ def test_inv_008(ctx):
             # a TransientModel and nothing reaches the ledger until
             # action_create_payments runs, so every figure below is read
             # before any money moves.
-            wizard_1 = register_payment(ctx, [move_a, move_b],
-                                        company=company)
-            popup_1 = _popup(ctx, wizard_1)
+            try:
+                wizard_1 = register_payment(ctx, [move_a, move_b],
+                                            company=company)
+                popup_1 = _popup(ctx, wizard_1)
+            except OdooRPCError as exc:
+                # The one failure mode whose cause the platform can name.
+                # Anything else keeps its own verdict — relabelling an
+                # unrelated crash as this defect would misdirect the fix.
+                if _is_batch_sequence_error(exc):
+                    ctx.blocked(f"{NO_BATCH_PAYMENT_SEQUENCE} — the Pay "
+                                f"pop-up over invoices #{move_a} and #{move_b} "
+                                f"raised: {exc}")
+                raise
             _log_popup(ctx, "set 1 — A+B, as offered", popup_1, popup_rows)
 
             ctx.check_true(
@@ -554,20 +642,18 @@ def test_inv_008(ctx):
             ctx.check("The payments in the Payments list add up to 3,000.00",
                       money(TOTAL_C1),
                       money(sum(row["amount"] for row in listed)))
-            misattributed = [
-                f"{row['name']} ({row['amount']:.2f}) is attributed to "
-                f"{row['partner']!r}"
-                for row in listed if row["partner_id"] != partner_c1]
-            ctx.check("Every payment is correctly attributed to Customer 1",
-                      [], misattributed)
-            # THE ABOVE CANNOT FAIL ON ITS OWN. `listed` came out of a search
-            # already filtered on partner_id = Customer 1, so re-checking the
-            # partner of its rows re-states the domain. The workbook's
-            # "correctly attributed to Customer 1" is a real question and needs
-            # the two populations compared: the payments action_create_payments
-            # says it made, and the payments Customer 1's Payments list shows.
-            # A payment booked against the wrong customer disappears from the
-            # list and shows up here as a missing id.
+            # NOTE there is deliberately NO "every row of `listed` names
+            # Customer 1" check here. `listed` came out of a search whose
+            # domain already contains ("partner_id", "=", partner_c1), so such
+            # a check restates the domain and cannot fail — it would read as
+            # evidence while proving nothing. The workbook's "correctly
+            # attributed to Customer 1" is a real question, and the two checks
+            # below are the ones that answer it: compare the two populations
+            # (the payments action_create_payments says it made, and the
+            # payments Customer 1's Payments list shows — a payment booked
+            # against the wrong customer disappears from the list and shows up
+            # as a missing id), then read partner_id off the created records
+            # themselves rather than off a search that presumes it.
             ctx.check("The payments the pop-up created ARE the payments on "
                       "Customer 1's Payments list — none of the 3,000.00 was "
                       "booked against anybody else, and nothing else is "

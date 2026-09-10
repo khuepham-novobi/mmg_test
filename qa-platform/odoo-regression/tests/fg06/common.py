@@ -70,7 +70,10 @@ Safety properties this suite keeps
 """
 from __future__ import annotations
 
+import re
+
 from adapters.base import OdooRPCError
+from framework.context import BlockedTest, SkipTest
 
 # --------------------------------------------------------------- identity
 FEATURE = "FG-06 Customer & Vendor Deposits"
@@ -242,6 +245,37 @@ def fields_present(rpc, model: str, names) -> set:
                             attributes=["type"]))
     except OdooRPCError:
         return set()
+
+
+# ------------------------------------------------------------- view arches
+def _tag_attrs(arch: str, tag: str, name: str) -> str:
+    """The raw opening ``<tag name="…" …>`` for one named element in an arch.
+
+    A string search rather than an XML parse: what is being asserted is that a
+    specific attribute expression is present *on that element*, and the tag
+    text is the most faithful evidence to put in front of a reviewer.
+
+    Scoping to the element's OWN tag is the whole point. ``'name="x" in arch
+    and 'readonly="1"' in arch`` passes whenever both strings appear anywhere
+    in the combined arch — a view of any size contains both — so an assertion
+    written that way still passes after the attribute it names is deleted from
+    the field. ``[^>]`` stops at the element's own closing angle bracket and
+    matches newlines, so a tag whose attributes are spread over several lines
+    (which is how ``sale_partner_deposit/views/sale_order_views.xml:15-19``
+    writes the Deposits button) is still matched as one unit.
+    """
+    match = re.search(rf'<{tag}[^>]*name="{re.escape(name)}"[^>]*>', arch)
+    return match.group(0) if match else ""
+
+
+def field_attrs(arch: str, field_name: str) -> str:
+    """The raw ``<field name="…" …/>`` tag for one field in a view arch."""
+    return _tag_attrs(arch, "field", field_name)
+
+
+def button_attrs(arch: str, button_name: str) -> str:
+    """The raw ``<button name="…" …>`` tag for one button in a view arch."""
+    return _tag_attrs(arch, "button", button_name)
 
 
 # ------------------------------------------------------------------- gates
@@ -475,6 +509,25 @@ def company_default_deposit_account(ctx, side: str, company_id: int) -> dict:
     where ``res_company.create_or_update_deposit_property`` writes it
     (``account_partner_deposit/models/res_company.py:171-177``). Returns
     ``{}`` when the company has no default at all.
+
+    Precedence — why the choice is made in Python
+    ---------------------------------------------
+    Two rows can match: one scoped to this company and one global
+    (``company_id = NULL``). Odoo resolves that in
+    ``ir.default._get_model_defaults`` with ``ORDER BY d.user_id,
+    d.company_id, d.id`` plus "keep the highest priority default for each
+    field" (``odoo/addons/base/models/ir_default.py``) — ASCENDING, and
+    PostgreSQL sorts NULLs LAST in ASC, so the company-scoped row wins and the
+    global row is the fallback.
+
+    An ``order="company_id desc"`` on the search does NOT express that: it is
+    passed through to SQL verbatim (``odoo/orm/models.py:5250-5252`` adds no
+    NULLS clause), and PostgreSQL sorts NULLs FIRST in DESC — so the global
+    row came back first and shadowed the company's own default, the exact
+    opposite of the intent. Ordering by a Many2one also recurses into the
+    comodel's ``_order`` (``odoo/orm/models.py:5262-5300``), which makes the
+    SQL ordering less predictable still. The rows are therefore fetched
+    unordered-but-stable and the preference is applied here.
     """
     rpc = ctx.adapter.rpc
     field_name = DEPOSIT_ACCOUNT_FIELD[side]
@@ -485,8 +538,10 @@ def company_default_deposit_account(ctx, side: str, company_id: int) -> dict:
          ("user_id", "=", False),
          ("condition", "=", False),
          ("company_id", "in", [company_id, False])],
-        ["json_value", "company_id"], order="company_id desc")
-    for row in rows:
+        ["json_value", "company_id"], order="id")
+    scoped = [r for r in rows if m2o_id(r.get("company_id")) == company_id]
+    unscoped = [r for r in rows if not m2o_id(r.get("company_id"))]
+    for row in scoped + unscoped:
         raw = (row.get("json_value") or "").strip()
         if not raw or raw in ("null", "false"):
             continue
@@ -500,6 +555,98 @@ def company_default_deposit_account(ctx, side: str, company_id: int) -> dict:
         default["scope_company_id"] = m2o_id(row.get("company_id"))
         return default
     return {}
+
+
+def stored_partner_deposit_account_ids(ctx, side: str,
+                                       company_id: int) -> dict:
+    """Every deposit-account id STORED against a contact, read from the jsonb.
+
+    Why this cannot be done through the ORM
+    ---------------------------------------
+    ``Many2one.to_sql`` wraps a company-dependent Many2one in an EXISTENCE
+    sub-select — ``(SELECT a.id FROM account_account a WHERE a.id = <stored
+    id>)`` (``odoo/orm/fields_relational.py:466-478``) — and every ORM read
+    path goes through it: ``fetch`` builds its SELECT from
+    ``_field_to_sql`` (``odoo/orm/models.py:3905-3908``) and so does every
+    domain condition. So a stored id whose ``account.account`` row was
+    DELETED reads back as ``False``, indistinguishable over RPC from "this
+    contact never had an override" and from "this contact's override was
+    cleared". v19 erases the dangling reference on the way out.
+
+    That erasure is exactly what hides one of the two failure shapes
+    TC-DAT-019 exists to separate. The migration wrote raw ids into
+    ``res_partner.<field>`` as jsonb keyed by company id
+    (``odoo/orm/fields.py:783, 1218-1219``); if MS-001 mapped a v15 account to
+    an id that does not exist on v19, the value is still sitting in that
+    column and every contact carrying it silently falls back to the company
+    default. The only place the id survives is the column itself, so it is
+    read from the column.
+
+    Read-only, and never a reason to lose the case: the platform's SQL access
+    is optional (``framework/sqltool.py`` raises ``SqlUnavailable`` →
+    ``ctx.blocked`` when ``pg_host``/``pg_user`` are unset), so availability
+    is probed on ``ctx.env`` FIRST and reported as ``reason`` rather than
+    allowed to block a case that otherwise runs entirely over RPC.
+
+    Returns ``{"available": bool, "reason": str,
+               "stored": {partner_id: account_id}, "unreadable": [(id, raw)]}``.
+    """
+    field_name = DEPOSIT_ACCOUNT_FIELD[side]
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", field_name):    # defensive
+        return {"available": False, "stored": {}, "unreadable": [],
+                "reason": f"{field_name!r} is not a plain column name"}
+    if not (getattr(ctx.env, "pg_host", "")
+            and getattr(ctx.env, "pg_user", "")):
+        return {
+            "available": False, "stored": {}, "unreadable": [],
+            "reason": (
+                f"no PostgreSQL access is configured for environment "
+                f"{ctx.env.key!r} (ODOO{ctx.env.version}_PG_HOST / _PG_USER "
+                f"in config/local.yaml), and v19 erases a dangling "
+                f"company-dependent reference on every ORM read path "
+                f"(odoo/orm/fields_relational.py:466-478), so a migrated "
+                f"res_partner.{field_name} value pointing at a deleted "
+                f"account cannot be seen from here")}
+    # The pg_host/pg_user probe above only rules out framework/sqltool.py's
+    # SqlUnavailable path. Everything after it can still fail for reasons that
+    # are environment conditions, not verdicts: psycopg2 missing, the host
+    # unreachable, a bad password, the wrong dbname, a permission error on the
+    # table. Those must degrade to "not available" exactly like an unset
+    # host — never escape and turn a case that otherwise runs entirely over
+    # RPC into ERROR / AUTOMATION_ERROR.
+    try:
+        sql = ctx.sql
+        if not sql.column_exists("res_partner", field_name):
+            return {
+                "available": False, "stored": {}, "unreadable": [],
+                "reason": (f"res_partner has no {field_name} column — the "
+                           f"company-dependent value is not stored where "
+                           f"odoo/orm/fields.py:783 puts it")}
+        rows = sql.rows(
+            f"SELECT id, jsonb_extract_path_text({field_name}, %s) "
+            f"FROM res_partner "
+            f"WHERE {field_name} IS NOT NULL "
+            f"  AND jsonb_extract_path_text({field_name}, %s) IS NOT NULL "
+            f"ORDER BY id", (str(company_id), str(company_id)))
+    except (SkipTest, BlockedTest):
+        # ctx.sql raises BlockedTest through ctx.blocked when the environment
+        # has no pg_* config. Re-raise: a deliberate verdict is never swallowed.
+        raise
+    except Exception as exc:                                    # noqa: BLE001
+        return {
+            "available": False, "stored": {}, "unreadable": [],
+            "reason": (f"PostgreSQL is configured for environment "
+                       f"{ctx.env.key!r} but could not be used ({exc}), so "
+                       f"the stored res_partner.{field_name} ids could not "
+                       f"be read")}
+    stored, unreadable = {}, []
+    for partner_id, raw in rows:
+        try:
+            stored[partner_id] = int(raw)
+        except (TypeError, ValueError):
+            unreadable.append((partner_id, raw))
+    return {"available": True, "reason": "", "stored": stored,
+            "unreadable": unreadable}
 
 
 def partner_deposit_account(ctx, partner_id: int, side: str,

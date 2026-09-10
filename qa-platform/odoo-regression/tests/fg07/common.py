@@ -273,11 +273,18 @@ NO_ACCOUNTANT = (
 )
 
 NO_MMG_INVOICE_TEMPLATE = (
-    "'mmg_change_invoice_template' and/or 'mmg_account' are not installed on "
-    "this database, so none of the nine layout changes the workbook checks "
-    "can be present and the invoice would print as a stock Odoo document. "
-    "Install the ported modules from the MMG v19 addons path before running "
-    "the three PDF cases"
+    "'mmg_account' is not installed on this database, so none of the nine "
+    "layout changes the workbook checks can be present and the invoice would "
+    "print as a stock Odoo document. In Odoo 19 mmg_account is the ONLY "
+    "module that owns the printed invoice: it ABSORBED the v15 module "
+    "mmg_change_invoice_template as part of the upgrade (decision D1 — see "
+    "mmg_account/__manifest__.py, 'Absorbs mmg_change_invoice_template as of "
+    "the v19 upgrade'), and the whole consolidated layout now lives in "
+    "mmg_account/report/report_invoice.xml. Do NOT look for a module called "
+    "mmg_change_invoice_template on a v19 database: it does not exist on the "
+    "staging_19 branch and its absence is correct, not damage. Install "
+    "mmg_account from the MMG v19 addons path before running the three PDF "
+    "cases"
 )
 
 NO_DEFAULT_JOURNAL = (

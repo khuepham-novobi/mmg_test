@@ -237,7 +237,12 @@ def _account_labels(ctx, account_ids, company) -> dict:
     id="TEST-FG07-INV-016",
     workflow=WORKFLOW,
     workflow_name=WORKFLOW_NAME,
-    module="account_auto_transfer",
+    # The v19 module name. The v15 Enterprise module was called
+    # account_auto_transfer and NO module of that name exists in Odoo 19
+    # (enterprise-19.0/account_transfer/), so declaring the v15 name here made
+    # this case's Module(s) column point at something the client cannot
+    # install. The runtime rename diagnostic below still probes BOTH names.
+    module="account_transfer",
     priority="P2",
     kind="DATA",
     order=713,
@@ -749,9 +754,9 @@ def test_inv_016(ctx):
                         f"working' when it is not")
 
             residual.append(
-                f"compare the state of each rule against the Novobi "
-                f"baseline, remembering that 'Running' in the old system is "
-                f"'In Progress' here and is the SAME stored value: "
+                "compare the state of each rule against the Novobi "
+                "baseline, remembering that 'Running' in the old system is "
+                "'In Progress' here and is the SAME stored value: "
                 + "; ".join(f"{state} ({state_labels.get(state, '?')}): "
                             f"{sorted(str(n) for n in names)}"
                             for state, names in sorted(by_state.items()))
