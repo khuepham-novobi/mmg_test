@@ -1,0 +1,67 @@
+{
+  "TC-LBL-001": {
+    "decision": "blocked_stub",
+    "reason": "P0. Certificate rendering needs the server-side py3o engine; _render_py3o is underscore-private (not callable over external RPC) and the v15 visual baseline comparison is manual. Offline half implemented: report record (py3o/odt, report/certificate.odt, model product.product), and every data field feeding the certificate asserted on a full namespaced fixture as one collected mismatch dict, then ctx.blocked.",
+    "test_id": "TEST-FG02-LBL-001"
+  },
+  "TC-LBL-002": {
+    "decision": "blocked_stub",
+    "reason": "P0. The path chooser (_get_product_template_certificate_report_path) and _get_template_fallback are underscore-private methods — not callable over external RPC — and the shipped-ODT byte comparison plus block-level render inspection run server-side. Offline half implemented: chooser inputs (x_date + description_sale both set) and the template report record with its XML fallback path, both as collected mismatch dicts, then ctx.blocked.",
+    "test_id": "TEST-FG02-LBL-002"
+  },
+  "TC-LBL-003": {
+    "decision": "blocked_stub",
+    "reason": "P0. Same private-chooser/rendering limitation as TC-LBL-002. Offline half implemented for the no-date input state (provenance set, x_date empty); expected chooser path report/template_certificate_no_date.odt recorded in the blocked reason, then ctx.blocked.",
+    "test_id": "TEST-FG02-LBL-003"
+  },
+  "TC-LBL-004": {
+    "decision": "blocked_stub",
+    "reason": "P0. Same private-chooser/rendering limitation. Offline half implemented for the no-provenance input state (x_date set, description_sale empty); expected chooser path report/template_certificate_no_provenance.odt recorded in the blocked reason, then ctx.blocked.",
+    "test_id": "TEST-FG02-LBL-004"
+  },
+  "TC-LBL-005": {
+    "decision": "blocked_stub",
+    "reason": "P0. Same private-chooser/rendering limitation. Offline half implemented for the neither-date-nor-provenance input state; expected chooser path report/template_certificate_no_date_no_provenance.odt recorded in the blocked reason, then ctx.blocked.",
+    "test_id": "TEST-FG02-LBL-005"
+  },
+  "TC-LBL-006": {
+    "decision": "blocked_stub",
+    "reason": "P1. Offline half implemented: template-level report record fully asserted as one collected mismatch dict (model, report_name product.template.certificate, py3o/odt, Print-menu binding on product.model_product_template) on a full-data fixture. The _render_py3o run and the template-form download are server-side rendering — ctx.blocked.",
+    "test_id": "TEST-FG02-LBL-006"
+  },
+  "TC-NEW-005": {
+    "decision": "not_implemented",
+    "reason": "manual decision gate (workbook automation_status MANUAL_ONLY): accept the LibreOffice SPOF with a named monitoring plan, or log a QWeb migration as backlog, and correct mmg.md section 0. No automatable behaviour.",
+    "test_id": null
+  },
+  "TC-SMK-011": {
+    "decision": "blocked_stub",
+    "reason": "P0. Offline half implemented: mmg_stock/mmg_report/report_py3o all installed, the avery_label_30_report record (report_name avery.label.30, py3o, docx) as a collected mismatch dict, and the wizard action routing to avery.label.30/py3o. The LibreOffice-dependent half is BLOCKED on the workbook's own precondition: lo_bin_path and is_py3o_report_not_available are probed and logged (host tooling, not MMG behaviour — the runtime is absent on this host), so workbook steps 1-2 (odoo-bin boot-log scan), 4 (lo_bin_path non-empty) and 6-7 (the real ODT-to-DOCX _render_py3o run and the b'PK' DOCX check) cannot execute here; the blocked reason quotes the observed engine values and names the fix (install LibreOffice on the Odoo host or point py3o.conversion_command at the binary).",
+    "test_id": "TEST-FG02-SMK-011"
+  },
+  "TC-LBL-007": {
+    "decision": "blocked_stub",
+    "reason": "P1. The ORM essence is fully asserted: get_purchase_info_based_on_sol returns the most recent confirmed sale ('2025-06-30', the namespaced latest buyer, 1500.0) over a cancelled decoy with the newest id, and ('', '', 0.0) for a never-sold product; order states are asserted as one collected check (decoy cancelled, the other two in sale/done). Fixture adaptation after RUN-5C016D16 (AUTOMATION_ERROR): fixture products pin invoice_policy='order' and the company flag auto_create_invoice_after_confirming_so is snapshotted/cleared for the confirmation step and restored in the finally, because mmg_sale_auto_create_invoice calls _create_invoices() from action_confirm() and the clone's default 'delivery' policy made confirmation raise sale's nothing-to-invoice UserError. Only the final printed-certificate last-sale block inspection is rendering — ctx.blocked on that step.",
+    "test_id": "TEST-FG02-LBL-007"
+  },
+  "TC-LBL-008": {
+    "decision": "blocked_stub",
+    "reason": "P0. Offline half implemented: 35 namespaced fixtures auto-select avery.label.60 (py3o action asserted as one dict), slot order follows product_ids (check_list_data sampled at 0/17/34, collected), slots past the selection return '' (collected), and slot 0's artist, formatted price and description line are asserted as one collected dict. Fixture adaptation after RUN-5C016D16 (ASSERTION '$0.0'): label fixtures now carry a distinct non-zero price written to both list_price and lst_price, because multichannel_manage_price makes product.product.lst_price read the stored variant_price; the price assertion is now the exact digest.digest._format_currency_amount rendering of the fixture's own price (symbol + float str(), from the product's own currency) plus a non-zero-price precondition check. Pagination, slot geometry and the v15 page-by-page baseline are the rendered DOCX — ctx.blocked.",
+    "test_id": "TEST-FG02-LBL-008"
+  },
+  "TC-LBL-009": {
+    "decision": "blocked_stub",
+    "reason": "P1. Offline half implemented: the 65/95/125 selections are probed in a loop and the count->format routing (report_name, report_type, first slot past the selection) is asserted once as a collected dict, the empty-selection default is avery.label.120, and the three formats' py3o_template_fallback ODT paths are asserted as one collected dict. Rendered pagination/layout and v15 baseline comparison — ctx.blocked.",
+    "test_id": "TEST-FG02-LBL-009"
+  },
+  "TC-LBL-010": {
+    "decision": "blocked_stub",
+    "reason": "P1. Offline half implemented: action_export_avery_label_6 returns avery.label.6/py3o (one dict check), get_page_groups()==[0,1] for 8 products, the page-slot mapping check_list_data_6(1,1)/(1,2) as one collected dict, and the description line from check_label_description_6. The rendered 2-page DOCX — ctx.blocked.",
+    "test_id": "TEST-FG02-LBL-010"
+  },
+  "TC-LBL-011": {
+    "decision": "blocked_stub",
+    "reason": "P1. Offline half implemented: all four print server actions (state, binding model, binding_view_types, code) asserted as one collected mismatch dict; all four entry-point methods (template and variant, label and backtag) probed and asserted once as an expected/observed pair covering report_name, report_type and the wizard's product_ids, with each wizard identified by an id watermark taken immediately before the call. The UI download of the rendered document — ctx.blocked.",
+    "test_id": "TEST-FG02-LBL-011"
+  }
+}

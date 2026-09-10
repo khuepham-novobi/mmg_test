@@ -1,0 +1,137 @@
+{
+  "TC-SAL-006": {
+    "decision": "blocked_stub",
+    "reason": "Essence is the pure onchange path: sale.order.line.new({...}) followed by _onchange_x_discount() asserted on the UNSAVED virtual record. The runner drives /web/dataset/call_kw, which has no representation for a virtual record (the web client's own onchange RPC returns a value dict, not the record the workbook asserts on, and cannot host new()), so it runs as an Odoo TransactionCase only. The stub probes that sale.order.line.x_discount exists, logs its declared type, then blocks with that detail. Expected v15 outcome under the v15 formula: had the onchange been reachable, qty 2 x 500 with x_discount 100 would give discount 20.00, not the workbook's 10.00 (the v15 denominator is price_unit only) - covered through the write path by TEST-FG03-SAL-007.",
+    "test_id": "TEST-FG03-SAL-006"
+  },
+  "TC-SAL-007": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable over RPC: create with x_discount, qty write, price write, the falsy-x_discount guard line and an idempotence rewrite. Expected v15 outcome: FAIL. v15 has no create() hook (discount stays 0.00 where the workbook expects 10.00) and divides by price_unit only, so qty 4 gives 20.00 where 5.00 is expected and price 250 gives 40.00 where 10.00 is expected; only the guard line (manual discount 7.00 untouched) passes. Writes go through attempt() so that a Char-typed Studio field - which would make rec.x_discount * 100 raise instead of returning a percentage - is recorded as the actual value instead of aborting the run.",
+    "test_id": "TEST-FG03-SAL-007"
+  },
+  "TC-SAL-008": {
+    "decision": "blocked_stub",
+    "reason": "PERF test whose verdict is a wall-clock comparison (v19 <= v15 x 1.2) around one timed 500-line bulk write, plus a live server-log watch for RecursionError / MemoryError / nested UPDATE sale_order_line cascades. Neither the timing threshold nor the log watch is available to this runner, and a 500-line fixture write on the shared production clone is not a safe automated step. Stub probes the field and blocks with 'performance harness - manual baseline'.",
+    "test_id": "TEST-FG03-SAL-008"
+  },
+  "TC-SAL-019": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: the exactly-discounted line, the over-discount clamp, the zero-price short-circuit and the confirmation of an order holding those lines. Expected v15 outcome: FAIL. The lines are created with x_discount in the create vals exactly as the workbook writes them, and v15 has no create hook, so discount stays 0.00 on both the exactly-discounted line (expected 100.00, subtotal expected 0.00) and the over-discounted one (expected a clamp at exactly 100.00, which v15 has no guard for either). The zero-price short-circuit (0.0) and the confirmation of the order both pass. The auto-invoice company flag is switched off around the confirm step and restored in finally, and AvaTax's force_address_validation is probed first so a hijacked action_confirm blocks instead of producing a false failure.",
+    "test_id": "TEST-FG03-SAL-019"
+  },
+  "TC-SAL-020": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: create at qty 0 then write qty 2. Expected v15 outcome: FAIL on the second half. The qty-0 create gives discount 0.0 as expected (v15 has no create hook at all, so the pass is incidental), but the qty write then applies 50 * 100 / 500 = 10.00 where the workbook expects 5.00, because quantity is not in the v15 denominator.",
+    "test_id": "TEST-FG03-SAL-020"
+  },
+  "TC-SAL-001": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: write path, create path and the import/API batch-create path, all asserting partner_shipping_id against the company partner. Expected v15 outcome: FAIL on step 3 only (write and create paths pass). The v15 override is written '@api.model def create(self, vals)' and whether core wraps a method named 'create' per record is [UNVERIFIED] here - the Odoo 15 core tree is not part of this workspace, so no claim is made in code: the test records the batch outcome verbatim. The likely outcome is a refusal, because mmg_magento2_ept_inherit.sale.order.create() (also @api.model) calls res._check_positive_quantity(), which starts with ensure_one() and therefore raises 'Expected singleton' on a 2-record result; if instead v15 does loop per record, step 3 simply passes. BC-001 (@api.model_create_multi) is the v19 fix. The AvaTax jurisdiction step (step 4) belongs to TC-TAX-009 and is logged as evidence: the QA clone is neutralized, with no AvaTax credentials.",
+    "test_id": "TEST-FG03-SAL-001"
+  },
+  "TC-SAL-002": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: un-tick the flag, assert the gallery address stays (the override only rewrites on a truthy write), then assert a manual correction persists. Expected to PASS on both versions - it records the documented one-way behaviour as the v15 baseline.",
+    "test_id": "TEST-FG03-SAL-002"
+  },
+  "TC-SAL-022": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: sale.order.copy over RPC (copy carries @api.returns so the web endpoint returns the new id), then the copied line's discount data, the flag/address pair, a manual address correction and the confirmed total. Expected v15 outcome: FAIL on the copied discount only - the fixture's dollar discount is applied with a write (the path a save takes on v15), so v15 stores 20.00 and the copy carries 20.00 where the workbook expects 10.00. The draft state, x_discount preservation, flag/address consistency and equal totals pass.",
+    "test_id": "TEST-FG03-SAL-022"
+  },
+  "TC-DAT-010": {
+    "decision": "implemented",
+    "reason": "DATA_RECONCILIATION, read-only: the relation is verified before it is queried (fields_get on sale.order.line.invoice_lines plus an information_schema check that sale_order_line_invoice_rel has order_line_id / invoice_line_id), then sale_order_line_invoice_rel row count and the per-order invoice_status distribution are captured (QA fixture partners excluded) and persisted on v15 for the v19 diff, followed by an ORM spot check that display_invoice_ids equals order_line.invoice_lines.move_id minus cancelled and non-customer moves on the 20 lowest-id invoiced orders. BLOCKED rather than failed when the environment has no PostgreSQL configuration, which the workbook lists as a precondition.",
+    "test_id": "TEST-FG03-DAT-010"
+  },
+  "TC-SAL-003": {
+    "decision": "implemented",
+    "reason": "Fully automatable through the public wizards: invoices are created with sale.advance.payment.inv (the private _create_invoices cannot be called over the web endpoint) and the credit note with account.move.reversal. Expected to PASS on v15: mmg_sale's display_invoice_ids compute filters order_line.invoice_lines.move_id to non-cancelled out_invoice/out_refund moves, and the reversal keeps sale_line_ids via sale's _copy_data_extend_business_fields, so the credit note is included and the cancelled invoice is excluded while staying in native invoice_ids. Posting is guarded: a refused action_post (closed period, rights) blocks the test instead of reporting a false defect.",
+    "test_id": "TEST-FG03-SAL-003"
+  },
+  "TC-SAL-016": {
+    "decision": "not_implemented",
+    "reason": "Essence needs a SECOND company with its own invoiceable order. On this neutralized production clone that means creating a res.company, which (a) cannot be swept - v15 res.company has no active flag, and unlink is refused once the warehouse, sequences and journals created with it are referenced - leaving a permanent unremovable fixture in the QA database, and (b) requires adding that company to the admin user's allowed companies, i.e. modifying a pre-existing record. Both break the suite's fixture rules for a P2 / NOT_PLANNED test case. The parked WIP version did create such a company and was dropped for this reason. Re-home it on a disposable multi-company sandbox database, or run it as the workbook plans it (manual). The company-scoping of the flag is exercised indirectly by TEST-FG03-SAL-013/-015, which snapshot and restore the flag of the order's own company.",
+    "test_id": null
+  },
+  "TC-SAL-013": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: flag on (snapshotted and restored in finally), confirm one order, assert exactly one draft invoice and that action_confirm returns the account.move window action. Expected to PASS on v15: with a single record the module's loop runs once, _create_invoices() produces one invoice and action_view_invoice() returns res_model 'account.move'.",
+    "test_id": "TEST-FG03-SAL-013"
+  },
+  "TC-SAL-014": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable, plus the workbook's read-only historical duplicate hunt (skipped with a log line, not a BLOCKED verdict, when no PostgreSQL access is configured). Expected v15 outcome: FAIL. The v15 action_confirm loops 'for rec in self' but calls self._create_invoices() on the WHOLE recordset inside the loop, so the batch confirm is refused and the orders stay draft - a different outcome from the workbook source note's '9 invoices' hypothesis. Which override refuses first is [UNVERIFIED] and deliberately not asserted: either sale._create_invoices() raising _nothing_to_invoice_error() on the second pass, or account_avatax_sale_oca.action_confirm() reading self.company_id (a singleton field read) on the multi-record recordset. The server's own message is recorded verbatim as the actual value; the same-partner variant fails the same way.",
+    "test_id": "TEST-FG03-SAL-014"
+  },
+  "TC-SAL-015": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: flag off (snapshotted and restored), confirm, assert no invoice, invoice_status 'to invoice' and no account.move redirect. Expected to PASS on v15 - need_open_invoice stays False and the plain super() result is returned.",
+    "test_id": "TEST-FG03-SAL-015"
+  },
+  "TC-SAL-021": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable including the confirmation wizard: v15 action_cancel returns the sale.order.cancel action when a draft invoice exists and the test completes it. The fixture (a confirmed order carrying exactly one auto-created invoice) is TC-SAL-013's output and is probed: if it cannot be built the test BLOCKS pointing at TEST-FG03-SAL-013 instead of failing this TC for another TC's defect. Expected v15 outcome: FAIL. The order does reach 'cancel' and the invoice still exists, but v15 _action_cancel() calls inv.button_cancel() on the draft invoices first, so the auto-created invoice ends in state 'cancel' where the workbook requires 'draft'. The multi-order variant additionally fails with 'Expected singleton': v15 builds the wizard action with {'default_order_id': self.id} and fields.Id raises on a multi-record recordset - precisely the 'no traceback' expectation the workbook states.",
+    "test_id": "TEST-FG03-SAL-021"
+  },
+  "TC-NEW-001": {
+    "decision": "not_implemented",
+    "reason": "Manual decision gate, not a test: a Sales Manager plus upgrade architect validate the keep-vs-retire decision (already taken 2026-08-12, FG-03 decision #1) against staged data and produce a written mapping table plus a follow-up list for saved filters, reports and user briefing. The workbook itself classifies it MANUAL / MANUAL_ONLY with automation_approach 'Decision gate - business/architecture decision, not automatable'. The empirical input it consumes is produced by TEST-FG03-SAL-004, which logs the mapping row for every delivery state it reaches, including the native-only 'started' case.",
+    "test_id": null
+  },
+  "TC-SAL-004": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: pending after confirm, partial after a backorder-creating partial validation, full after the backorder, and no status when every transfer is cancelled. Fixture adaptation: the two delivery products are CONSUMABLES, not storables - sale_stock launches the stock rule and computes qty_delivered from stock moves for consu lines exactly as for product lines, while the fixture stays out of mmg_magento2_ept_inherit's two 'type == product' paths (_check_positive_quantity, which refused order creates for a fixture whose virtual_available had gone negative, and _export_order_line_stock_to_magento, whose update_magento_product raises without a default_code and can otherwise reach an outbound Magento API call). Expected v15 outcome: FAIL on the last step only. The v15 custom compute (mmg_sale_delivery_status, picking states only) returns pending/partial/full/False exactly as the first four steps expect, but has no 'started' value at all, so the two-step assertion fails. Adaptation: the two-step order is built only if a pick+ship warehouse already exists (read-only probe); re-configuring a live warehouse's delivery_steps would rewrite its stock rules and locations, which is not allowed on a pre-existing business record, so otherwise the missing precondition plus the observed selection list is recorded as the actual value.",
+    "test_id": "TEST-FG03-SAL-004"
+  },
+  "TC-SAL-005": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: fixture orders (consumable products, same adaptation as TC-SAL-004) are driven into pending, partial, full and all-cancelled, then search() and read_group() are asserted scoped to those fixture ids (the clone holds ~43k live orders, so an unscoped 'exactly N' assertion could never be deterministic - documented adaptation, the asserted logic is the workbook's). Expected to PASS on v15: the custom delivery_status is a stored compute and therefore searchable and groupable. The column/filter/group-by UI walkthrough stays a manual check and is logged.",
+    "test_id": "TEST-FG03-SAL-005"
+  },
+  "TC-SAL-009": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable against the workbook's v19 target, the native sale.order.sale_warning_text banner. Expected v15 outcome: FAIL. mmg_sale_warning_extend never declared an order-level warning text - it only adds is_show_warning_msg_box plus the warned-product popup - so the banner assertions record 'sale_warning_text absent on this version' as the actual value while the v15 observables (banner flag, popup product ids) are logged as mapping evidence. The negative half (no banner on an order without warned products) passes on both versions. Asserting the v15 popup INSTEAD of the banner would make both versions pass and hide the module retirement, so it is deliberately not done.",
+    "test_id": "TEST-FG03-SAL-009"
+  },
+  "TC-SAL-010": {
+    "decision": "implemented",
+    "reason": "Same shape as TC-SAL-009 on a 3-line order: the banner must pair each of the two warned products with its own (namespaced) message and never mention the unwarned one. Expected v15 outcome: FAIL - no order-level banner field; the retired popup's product ids are logged as evidence, and the 'P3 not mentioned' half passes.",
+    "test_id": "TEST-FG03-SAL-010"
+  },
+  "TC-SAL-012": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: remove the warned line, assert the banner is empty, re-add it and assert it returns. Expected v15 outcome: FAIL - the banner field does not exist. Documented in the test: the v15 missing-@api.depends refresh bug itself is only observable in a live form, because every RPC call runs in a fresh transaction and recomputes the non-stored field anyway; the in-form half therefore belongs to a UI tour, not to this API test.",
+    "test_id": "TEST-FG03-SAL-012"
+  },
+  "TC-SAL-011": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: a template with two variants, the template-level warning reaching both variants, the 'block' confirmation gate and the 'no-message' default. Expected v15 outcome: FAIL on the banner assertions (no order-level text field on v15) and on the blocking gate (v15 core only warns through sale.order.line's onchange, so action_confirm succeeds where the workbook expects a UserError naming the product and the order left in draft). The 'no-message' default passes.",
+    "test_id": "TEST-FG03-SAL-011"
+  },
+  "TC-STU-004": {
+    "decision": "implemented",
+    "reason": "HYBRID and fully automatable: the v15 data baseline (count of populated x_discount rows plus 20 ordered samples, QA fixtures excluded) is captured and persisted FIRST so the v19 diff survives the failing assertions, then the registry state and the write behaviour are asserted. Expected v15 outcome: FAIL on all three v19-target halves - x_discount is a Studio field (ir.model.fields state 'manual', not 'base', and not necessarily float), and the write path yields 20.00 on the qty 2 x 500 fixture where the workbook expects 10.00. BLOCKED instead when the environment has no PostgreSQL configuration, which the workbook lists as a precondition of the data check.",
+    "test_id": "TEST-FG03-STU-004"
+  },
+  "TC-DAT-009": {
+    "decision": "implemented",
+    "reason": "DATA_RECONCILIATION, read-only: per (year, mapped state) count, amount_untaxed, amount_tax and amount_total, captured on v15 and diffed on v19. The workbook's own state-mapping rule is applied inside the capture - v15 'sale' and 'done' are merged into one bucket because v19 has no separate 'done' state (locked orders are 'sale' with locked = TRUE) - otherwise every year holding locked orders would diff spuriously. QA fixture partners are excluded so reruns of the functional FG-03 tests cannot drift the baseline; the workbook's ~43,117-order volume is logged as dated context, never asserted.",
+    "test_id": "TEST-FG03-DAT-009"
+  },
+  "TC-SAL-017": {
+    "decision": "implemented",
+    "reason": "Fully automatable end to end: quotation with a converted dollar discount, confirm with auto-invoice on, delivery through stock.move.quantity_done plus button_validate, action_post on the invoice, and account.payment.register for the payment. The delivery leg uses a CONSUMABLE fixture product (same adaptation as TC-SAL-004: qty_delivered still comes from stock moves, the Magento mirror and the availability check are avoided). Expected v15 outcome: FAIL on the money. The v15 formula gives discount 20.00 and amount_untaxed 800.00 where the workbook expects 10.00 / 900.00 (and the invoice total follows); state 'sale', the single auto-created invoice, delivery_status pending then full, qty_delivered 2.0, invoice_status 'invoiced', payment_state paid/in_payment and the display_invoice_ids cross-check all pass. BLOCKED up front when the company has no bank or cash journal, which the workbook lists as a precondition.",
+    "test_id": "TEST-FG03-SAL-017"
+  },
+  "TC-SAL-018": {
+    "decision": "implemented",
+    "reason": "Fully automatable through account.move.reversal: posted out_refund, reversed_entry_id linkage, the order's invoice_status after a full refund, and both documents in display_invoice_ids (the reversal keeps sale_line_ids via sale's _copy_data_extend_business_fields). Expected to PASS on v15 - it records the standard-Odoo baseline the v19 run is compared against. A refused action_post on the fixture invoice blocks the test rather than reporting a false defect.",
+    "test_id": "TEST-FG03-SAL-018"
+  },
+  "TC-SAL-023": {
+    "decision": "implemented",
+    "reason": "HYBRID: _render_qweb_pdf returns bytes that cannot cross the JSON-RPC boundary, so the report is driven through the web client's own endpoints over an authenticated session - /report/pdf for the render check (HTTP 200 and a %PDF- payload) and /report/html for the text assertions (order name, product, discount value, order total). wkhtmltopdf is probed with get_wkhtmltopdf_state() first and a missing binary BLOCKS rather than fails, as an environment precondition. Expected v15 outcome: FAIL on one assertion - the Disc.% column renders 20.00, so the workbook's '10.00' is absent; name, product and total are present. PDF-to-text extraction is replaced by the HTML rendering of the same report because no text-extraction tool is available in this runner (documented in the test).",
+    "test_id": "TEST-FG03-SAL-023"
+  }
+}

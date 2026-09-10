@@ -1,25 +1,64 @@
-# Copy to config/local.yaml and edit for your workstation (local.yaml is
-# gitignored). Loaded by backend/config.py after .env; real environment
-# variables still win over these values.
+# Copy to config/local.yaml and edit for THIS workstation.
+#
+#   copy config\local.yaml.example config\local.yaml
+#
+# config/local.yaml is gitignored on purpose — it holds credentials and they
+# must never reach the repository. Loaded by backend/config.py after .env;
+# real environment variables still win over both.
+#
+# You do NOT need .env as well: everything can live here.
+
 env:
-  # Odoo 15 QA target — always a dedicated clone, never a production copy.
-  ODOO15_URL: http://localhost:8076
-  ODOO15_DB: <your v15 QA clone, e.g. mmg_qa15>
+  # ---------------------------------------------------------------- Odoo 19
+  # The FG-05 suite (AvaTax) is Odoo-19-only. On any other target every case
+  # reports BLOCKED with a reason, by design.
+  #
+  # ODOO19_URL must match the port your v19 server actually listens on.
+  # MMG's mmg.conf uses http_port = 8076. If this is wrong, EVERY test
+  # reports "BLOCKED / ENVIRONMENT — Odoo 19 unreachable at <url>" before a
+  # single test body runs. That is the runner's preflight refusing to invent
+  # a verdict, not a broken test.
+  ODOO19_URL: http://localhost:8076
+  ODOO19_DB: <your v19 QA clone, e.g. mmg_qa19>
 
-  # Read-only PostgreSQL access for the DATA_RECONCILIATION tests.
-  # Omit to have those tests report BLOCKED instead of running.
-  ODOO15_PG_HOST: localhost
-  ODOO15_PG_PORT: 5433
-  ODOO15_PG_USER: <db user>
-  ODOO15_PG_PASSWORD: <db password>
+  # NOT necessarily "admin". On a restored production database res.users id 1
+  # is __system__ and INACTIVE, and the real administrator is a named person.
+  # Check before you guess:
+  #   SELECT id, login, active FROM res_users WHERE id IN (1,2);
+  #
+  # The user MUST be in base.group_system. res.company.avalara_api_id and
+  # avalara_api_key carry groups='base.group_system', so a lesser user simply
+  # does not receive those fields: TC-DAT-017 would report them "not set" and
+  # TC-TAX-017 BLOCKS (it refuses to overwrite a key it cannot read back, and
+  # therefore could not restore).
+  ODOO19_USERNAME: <a real, active login with System Administrator rights>
+  ODOO19_PASSWORD: <that user's password>
 
-  # Odoo 19 target, once a local instance exists.
-  ODOO19_URL: http://localhost:8019
-  ODOO19_DB: <your v19 QA database>
-  ODOO19_PG_HOST: localhost
-  ODOO19_PG_PORT: 5433
-  ODOO19_PG_USER: <db user>
-  ODOO19_PG_PASSWORD: <db password>
+  # ---------------------------------------------------------------- Odoo 15
+  # Only needed for the FG-01..FG-04 suites. Leave commented for FG-05 work.
+  # ODOO15_URL: http://localhost:8076
+  # ODOO15_DB: <your v15 QA clone, e.g. mmg_qa15>
+  # ODOO15_USERNAME: admin
+  # ODOO15_PASSWORD: <password>
 
-  # false opens a real Chromium window for UI tests
+  # ------------------------------------------------- direct SQL (optional)
+  # Only the DATA_RECONCILIATION suites use ctx.sql. FG-05 uses NONE of it,
+  # so you can leave all ODOO*_PG_* unset for AvaTax work. Where a suite does
+  # need SQL, omitting these makes it report BLOCKED instead of running.
+  # ODOO15_PG_HOST: localhost
+  # ODOO15_PG_PORT: 5433
+  # ODOO15_PG_USER: <db user>
+  # ODOO15_PG_PASSWORD: <db password>
+  # ODOO19_PG_HOST: localhost
+  # ODOO19_PG_PORT: 5433
+  # ODOO19_PG_USER: <db user>
+  # ODOO19_PG_PASSWORD: <db password>
+
+  # ------------------------------------------------------------- behaviour
+  # Booting the Odoo web client on a large database is slow; give navigations
+  # a realistic budget so a slow boot is not read as a failure.
+  NAV_TIMEOUT_MS: "120000"
+
+  # "false" opens a real Chromium window for UI tests.
+  # FG-05 is API-only and never launches a browser, so this is irrelevant to it.
   HEADLESS: "true"

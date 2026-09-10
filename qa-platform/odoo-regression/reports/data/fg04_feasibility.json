@@ -1,0 +1,92 @@
+{
+  "TC-BLK-008": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable. Asserts the v19 two-state confirmation gate (state 'select', UserError on direct apply, confirm_message naming category and count) before the gated replace-write — the v15 wizard has no gate, so the v15 baseline is an expected FAIL at the gate assertions (immutable workbook expectation, classifies FIXED on v19).",
+    "test_id": "TEST-FG04-BLK-008"
+  },
+  "TC-BLK-009": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: add-semantics on x_categ_ids, stored website_extra_categories recompute, control untouched. The final empty-pick UserError guard is the v19 port behaviour — expected v15 baseline FAIL on that last step (v15 is a silent no-op).",
+    "test_id": "TEST-FG04-BLK-009"
+  },
+  "TC-BLK-001": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: picker domain, clear-then-link replace semantics on 10 templates, control + fresh-tax global count as the baseline diff.",
+    "test_id": "TEST-FG04-BLK-001"
+  },
+  "TC-BLK-002": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: wizard default taxes_id == company account_sale_tax_id. Company config is only written when no default exists, snapshotted and restored in finally.",
+    "test_id": "TEST-FG04-BLK-002"
+  },
+  "TC-BLK-004": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: the product_ids branch of assign() with the same replace semantics; control variant and fresh-tax count prove selection scope.",
+    "test_id": "TEST-FG04-BLK-004"
+  },
+  "TC-BLK-017": {
+    "decision": "implemented",
+    "reason": "Automatable via the JSON-RPC call_kw endpoint (the /web/dataset/call_kw equivalent) plus ORM reads of act_window groups_id and ir.model.access rows. Asserts the confirmed v19 ACL matrix — the v15 baseline is an expected FAIL (v15 leaves the wizards on base.group_user). Positive control runs with a dedicated manager-group user.",
+    "test_id": "TEST-FG04-BLK-017"
+  },
+  "TC-BLK-003": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: empty-tax guard UserError 'Missing Customer Taxes.' with no write.",
+    "test_id": "TEST-FG04-BLK-003"
+  },
+  "TC-BLK-005": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: property_account_position_id written on the 10 selected partners, baseline diff + control + fresh-position count. The workbook's TC-DAT-019 sign-off gate is recorded as a log line (execution-order dependency, not an assertion).",
+    "test_id": "TEST-FG04-BLK-005"
+  },
+  "TC-BLK-007": {
+    "decision": "implemented",
+    "reason": "Automatable with a dedicated FG04 second company (created once, reused across runs — company deletion is unsafe on a stock-enabled clone) and per-company context reads/writes; the acting user's company access is snapshotted and restored in finally.",
+    "test_id": "TEST-FG04-BLK-007"
+  },
+  "TC-BLK-006": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: empty-position guard UserError 'Missing Fiscal Position.' with no write.",
+    "test_id": "TEST-FG04-BLK-006"
+  },
+  "TC-BLK-010": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: x_type written on the 5 selected partners, control untouched. The v15 button method update() vs the v19 rename action_update_customer_type() (DW-006) is absorbed by a version helper, as documented in the workbook step itself.",
+    "test_id": "TEST-FG04-BLK-010"
+  },
+  "TC-BLK-011": {
+    "decision": "not_implemented",
+    "reason": "P2 and the precondition is unattainable on the shared clone: it requires a database where res.partner has NO x_type field, but the production clone carries the data-bearing Studio field — removing it would drop the column and destroy live data (hard rule: never modify pre-existing records). Needs a dedicated CI database (the module's own TestUpdateCustomerTypeMissingField class).",
+    "test_id": null
+  },
+  "TC-BLK-012": {
+    "decision": "implemented",
+    "reason": "ORM-automatable: wizard create without a value is rejected (required-field violation at flush) and new_customer_type is asserted required=True via fields_get (the UI form's blocking indicator derives from it — documented adaptation of the manual UI half). No partner written.",
+    "test_id": "TEST-FG04-BLK-012"
+  },
+  "TC-BLK-013": {
+    "decision": "implemented",
+    "reason": "Workbook type is UI/tour; implemented at the binding-record level (act_window binding_model_id/binding_view_types render the Action-menu entries deterministically): 6 FG-04 bindings on the correct models, the seventh menu entry attributed to the mmg_stock print server actions, negative wrong-model checks. Documented adaptation — no browser tour runner in this platform phase.",
+    "test_id": "TEST-FG04-BLK-013"
+  },
+  "TC-BLK-014": {
+    "decision": "not_implemented",
+    "reason": "manual decision gate — workbook automation_type MANUAL/MANUAL_ONLY: a 1,000-record timed run compared against a manually recorded v15 wall-clock baseline with live worker-log monitoring at production limits; not automatable offline and a 1,000-record fixture write burst is unsuitable for the shared neutralized clone.",
+    "test_id": null
+  },
+  "TC-BLK-015": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable for all five wizards: 3 selected + 1 identical control each, new value on exactly the selection, fresh-value global counts equal the selection size.",
+    "test_id": "TEST-FG04-BLK-015"
+  },
+  "TC-BLK-016": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: the 120-record filtered domain (what the select-all banner feeds into active_ids) is written in full, rows 80..119 beyond the first list page explicitly asserted, non-matching controls untouched.",
+    "test_id": "TEST-FG04-BLK-016"
+  },
+  "TC-BLK-018": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable with a dedicated manager user session: write_uid == acting manager and write_date refreshed (server-clock 'before' taken from the wizard's own create_date) on the tax wizard plus the customer-type spot-check; the no-audit-trail gap is recorded as a log line per the workbook.",
+    "test_id": "TEST-FG04-BLK-018"
+  }
+}

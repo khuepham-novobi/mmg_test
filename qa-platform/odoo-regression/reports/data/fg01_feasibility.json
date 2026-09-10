@@ -1,0 +1,182 @@
+{
+  "TC-NEW-007": {
+    "decision": "not_implemented",
+    "reason": "Manual decision gate - workbook automation_type MANUAL: a Gallery Manager must be presented with the evidence and record option (a) re-implement or (b) retire the inventory-value feature in the FG-01 report. A business decision cannot be executed by a test; the evidence the gate consumes IS automated, by TEST-FG01-STU-009 (both template inventory-value columns all-zero on the v15 clone). Decision of record 2026-08-13: option (b).",
+    "test_id": null
+  },
+  "TC-STU-009": {
+    "decision": "implemented",
+    "reason": "Fully automatable read-only (SQL + registry reads). v15 captures the evidence pack for decision (b): both template inventory-value columns are all-zero (hard anchors - a non-zero count would be a genuine finding) and the variant non-zero counts go into the baseline for QC. The 'fields gone from the registry/schema' half is the v19-only step. Expected v15: PASS.",
+    "test_id": "TEST-FG01-STU-009"
+  },
+  "TC-ART-001": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: 17-field catalogue create, per-field read-back and the 14 sync-listed variant mirror fields, each verified through one collected mismatch mapping. 'Template-only' is asserted as the absence of INDEPENDENT variant storage (ir.model.fields row absent, or related == product_tmpl_id.<field>), because product.product _inherits product.template and therefore exposes every template field by delegation. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-001"
+  },
+  "TC-ART-002": {
+    "decision": "implemented",
+    "reason": "Workbook type is UI/TOUR; implemented as arch-level assertions on the served product form (template + variant) plus a rendered-form screenshot as evidence - no browser tour runner exists in this platform phase, and pixel-level 'renders and is editable' tick-off stays a documented manual residual. The field list is split by provenance so the 32 code-declared mmg_stock fields (the regression detector) are asserted before the v19-formalized groups. Expected v15: FAIL on the v19 groups (x_image_1..47 and x_desc/x_length/x_image/website_extra_categories are Studio/DB-only on v15) - documented baseline, classifies FIXED on v19.",
+    "test_id": "TEST-FG01-ART-002"
+  },
+  "TC-ART-014": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: the x.medium 341-row anchor (measured to still hold on this clone, asserted before any fixture exists), the admin CRUD round-trip and the ACL decision #4 plain-user CRUD through a second authenticated session. Expected v15: PASS - security/ir.model.access.csv already grants base.group_user full CRUD via access_x_medium_user.",
+    "test_id": "TEST-FG01-ART-014"
+  },
+  "TC-ART-015": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: the 10 seed XML ids resolved through ir.model.data, the no-duplicate guard on the live seed value 'White' (deliberately not namespaced) and the CRUD round-trip with a per-execution fixture name. Expected v15: PASS - data/product_color_data.xml ships the ten records with those XML ids in v15 mmg_stock.",
+    "test_id": "TEST-FG01-ART-015"
+  },
+  "TC-ART-016": {
+    "decision": "implemented",
+    "reason": "Same shape as TC-ART-015 against data/product_origin_data.xml (six sampled seed XML ids, the live 'Acoma' duplication guard, CRUD round-trip). Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-016"
+  },
+  "TC-ART-017": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: product.product.style CRUD, the _order = 'name' ordering proven with two namespaced fixtures whose prefixes keep the asserted alphabetical order, and plain-user CRUD. Expected v15: PASS - the ACL row carries no group, so it applies to every user.",
+    "test_id": "TEST-FG01-ART-017"
+  },
+  "TC-ART-018": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: CRUD, the m2o resolving from a product template, the referenced-unlink behaviour OBSERVED rather than prescribed (a raise or an FK null-out is accepted, but error and database state must agree), the clean unlink once unreferenced, and plain-user CRUD. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-018"
+  },
+  "TC-ART-019": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: ilike search on template and variant, the empty-artist filter and the read_group per-artist counts. The artist values are namespaced per execution because the searches and group counts match by them and the live catalogue really contains the workbook's artist names. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-019"
+  },
+  "TC-ART-020": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: m2o filter, dotted relation name-search, read_group counts and variant-level parity, with both medium names namespaced per execution. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-020"
+  },
+  "TC-ART-021": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: read_group by product_product_category_id on template and variant with the 3/1 counts, categories namespaced per execution. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-021"
+  },
+  "TC-ART-023": {
+    "decision": "implemented",
+    "reason": "Workbook type is UI/TOUR; implemented as assertions on the served list arch (presence, relative order, static invisibility, categ_id hidden, default_order, multi_edit) plus a rendered-list screenshot - presence and visibility are asserted as separate facts, and the contributing views are logged by priority so an absent column names its own cause. Expected v15: FAIL on the presence assertion - a DB-resident studio_customization view at priority 640 applies last and drops the barcode/Tile column that mmg_stock's own arch declares; documented baseline, asserted last so the other facts are still recorded.",
+    "test_id": "TEST-FG01-ART-023"
+  },
+  "TC-ART-024": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: product.template.load() with 20 art-column rows, a collected spot-check of three rows plus their variant sync, and the non-numeric Tile row rejected with an error message and no ids. Row names and barcodes are per-execution (barcode is UNIQUE database-wide). Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-024"
+  },
+  "TC-ART-025": {
+    "decision": "implemented",
+    "reason": "Automatable as export_data over 20 live templates (read-only, this platform's own fixtures excluded from the sample): every art field declared and exportable, 20 complete rows, sampled x_artist values populated. The XLSX rendering itself is web/base_import machinery rather than mmg_stock behaviour, so the ORM export payload is the evidence. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-025"
+  },
+  "TC-ART-026": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: archive cascades to the variant, values and the per-execution barcode survive the round-trip, and the channel-listing mapping note is logged (live-listing integrity belongs to FG-10). Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-026"
+  },
+  "TC-DAT-011": {
+    "decision": "implemented",
+    "reason": "Fully automatable read-only (SQL per column, ORM search_count where a field has no column) with the QA footprint excluded and raw/qa_excluded/residual logged. Expected v15: BLOCKED - the workbook's catalogue-size anchors (69,201 templates / 13,972 x_medium references) are a 2026-08-13 snapshot of the SOURCE production database, which itself now holds 69,316 / 14,001, so no clone taken today can satisfy them. anchor_or_blocked() reports that as BLOCKED (a precondition outside the test's control), never FAIL, and runs AFTER the v15 baseline is persisted so the v19 diff is unaffected.",
+    "test_id": "TEST-FG01-DAT-011"
+  },
+  "TC-DAT-012": {
+    "decision": "implemented",
+    "reason": "Fully automatable read-only: row counts of the six reference tables with QA rows excluded, the x_medium == 341 anchor (measured to still hold, so it stays a hard assertion) and the seed-duplication guard. The seed-XML-id resolution step is v19-only. Expected v15: PASS.",
+    "test_id": "TEST-FG01-DAT-012"
+  },
+  "TC-STU-008": {
+    "decision": "implemented",
+    "reason": "Fully automatable read-only: x_medium rows and template references with QA rows excluded, plus the Studio-duplicate-unreferenced assertions (zero relational fields, zero views). Expected v15: BLOCKED on the workbook anchors for the same dated-snapshot reason as TC-DAT-011 (13,972 references vs the 14,001 the source copy holds today); the 341-row half still matches and the baseline is persisted before the anchor step.",
+    "test_id": "TEST-FG01-STU-008"
+  },
+  "TC-STU-014": {
+    "decision": "implemented",
+    "reason": "Fully automatable read-only: populated counts of the four Studio variant fields (SQL where a column exists, archive-inclusive ORM fallback otherwise, both QA-excluding so they measure the same population) and a 5-record x_image binary decode sample. The code-owned-declaration assertion is v19-only. Expected v15: PASS.",
+    "test_id": "TEST-FG01-STU-014"
+  },
+  "TC-ART-011": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: all nine auction values persist and the six sync-listed ones mirror onto the variant, both verified through collected mismatch mappings. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-011"
+  },
+  "TC-ART-007": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: the stored website_extra_categories compute is checked after add, after partial removal and after removing the last category. Expected v15: FAIL on the last step - DW-005: _compute_website_extra_categories assigns only inside 'if record.x_categ_ids:' with no else branch, so the stored text keeps its stale value. Documented baseline, classifies FIXED on v19.",
+    "test_id": "TEST-FG01-ART-007"
+  },
+  "TC-ART-013": {
+    "decision": "implemented",
+    "reason": "Automatable with ORM + an authenticated HTTP session: the create-path probe, the write path, the image_1920_download mirror, an authenticated GET of /web/image returning the fixture bytes, and the unauthenticated behaviour recorded as documentation. Expected v15: FAIL on the create-path assertion - an image_1920 passed in create() values is silently dropped on v15 (a follow-up write() stores it), measured over the same /web/dataset/call_kw transport the web client uses, so it is a genuine finding and not a transport artefact. It is asserted last so the rest of the workbook's evidence is still recorded.",
+    "test_id": "TEST-FG01-ART-013"
+  },
+  "TC-DAT-013": {
+    "decision": "implemented",
+    "reason": "Fully automatable read-only: x_categ_ids relation rows and populated stored-compute rows with the QA footprint excluded (the earlier baseline counted archived QA fixtures and was a false PASS), a 20-record ORM recompute diff, and the DW-005 stale set quantified as a log line rather than asserted (TC-ART-007 owns that expectation). Expected v15: PASS.",
+    "test_id": "TEST-FG01-DAT-013"
+  },
+  "TC-ART-003": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable over the web transport: the sync mixin in both directions on create and write, the batched create path, and workbook step 6 asserted as the absence of independent variant storage for a non-sync field (a value comparison is unsatisfiable on any transport, because product.product _inherits product.template). Each step asserts one collected mismatch mapping. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-003"
+  },
+  "TC-ART-004": {
+    "decision": "implemented",
+    "reason": "Fully automatable (ORM + one read-only pg_constraint query): non-numeric Tile rejected at template and variant level, a per-execution numeric barcode saved, the duplicate rejected, and product_product_barcode_uniq present in pg_constraint. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-004"
+  },
+  "TC-ART-005": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: the duplicates are resolved from the database (ids present after minus before) instead of from copy()'s return value, because the v19 port drops @api.returns and call_kw could not serialise the returned recordset - that keeps the assertion about business behaviour on both versions. Expected v15: FAIL on the multi-record step - v15 copy() calls self.ensure_one() ('Expected singleton') and the per-record zip is the v19 fix DW-004. Documented baseline, classifies FIXED on v19.",
+    "test_id": "TEST-FG01-ART-005"
+  },
+  "TC-ART-008": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: the two mmg_stock server actions toggle x_exclude_cart on exactly the selection, the control record's x_exclude_cart and write_date are unchanged, and the list-view bindings (XML id resolves, bound model, binding_view_types) are asserted as one collected mapping. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-008"
+  },
+  "TC-ART-006": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable with its own consigned product + quant fixture (sampling live consigned stock made the read-back tautological and skipped the case whenever the clone held no consigned stock). Expected v15: FAIL on the group-by step - stock.quant.x_vendor is a non-stored related Char (mmg_stock/models/stock_quant.py:9) and read_group accepts stored fields only, so the workbook's groupable expectation is the v19 target. The resolve, search and search-view evidence is asserted first.",
+    "test_id": "TEST-FG01-ART-006"
+  },
+  "TC-ART-012": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: purchase.product_product_menu inactive, the PO form arch served without error with mmg_stock installed, and the three consignment fields readable from the PO line product as one collected assertion. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-012"
+  },
+  "TC-ART-022": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: x_gallery_cost / x_consignment_percentage persist on the variant, mirror onto the template through the sync mixin and come back through search_read for reporting - three collected read-backs. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-022"
+  },
+  "TC-ART-009": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable: the membership date persists, copy=False holds on duplicate, and the form spot-check asserts the field is in the served res.partner arch after the vat anchor mmg_stock xpaths against. Expected v15: PASS.",
+    "test_id": "TEST-FG01-ART-009"
+  },
+  "TC-ART-010": {
+    "decision": "implemented",
+    "reason": "Fully ORM-automatable through the platform's own QA internal user (both values snapshotted and restored in a defensive finally step). Expected v15: FAIL - CONFIRMED PRODUCT DEFECT, not a version gap: mmg_stock/models/res_users.py:9 declares a plain x_main_phone Char on res.users, which shadows the _inherits-delegated partner field, so partner and user own separate columns that can never agree. The declaration lives in the shared mmg_stock branch, so it will NOT self-heal on v19 - this FAIL must not be auto-scored FIXED, and a v19 FAIL here is not a regression.",
+    "test_id": "TEST-FG01-ART-010"
+  },
+  "TC-STU-005": {
+    "decision": "implemented",
+    "reason": "Fully automatable read-only: the 47 template image-URL columns counted in one generated query with raw/qa_excluded/residual per column, the four workbook anchors (6,221 / 603 / 20 / 0 - measured to still hold, so hard assertions), the 47 variant counts via ORM search_count (the v15 variant fields are non-stored related fields with no SQL columns) and the template->variant mirror spot-check. The zero-manual-leftovers assertion is v19-only. Expected v15: PASS.",
+    "test_id": "TEST-FG01-STU-005"
+  },
+  "TC-DAT-007": {
+    "decision": "implemented",
+    "reason": "Fully automatable read-only: the complete per product/location quantity + reserved CSV and the per-product totals CSV are exported with QA products excluded, attached as artifacts and hashed; v15 persists the baseline and asserts it is non-trivial, and the row-level v15/v19 diff (sha256 fast path, then a real symmetric row-set difference) is the v19 step. Expected v15: PASS.",
+    "test_id": "TEST-FG01-DAT-007"
+  },
+  "TC-DAT-008": {
+    "decision": "implemented",
+    "reason": "Fully automatable read-only: stock_valuation_layer value/quantity/row totals with QA products excluded, plus the TC-DAT-002 GL stock-account balance and the SVL-minus-GL delta carried in the same snapshot so the v19 diff covers the cross-check. Expected v15: PASS.",
+    "test_id": "TEST-FG01-DAT-008"
+  }
+}

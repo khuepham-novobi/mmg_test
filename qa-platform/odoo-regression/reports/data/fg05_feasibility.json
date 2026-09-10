@@ -1,0 +1,76 @@
+{
+ "_source": "MMG_v19_Client_Manual_Testing_Guideline_FG05-FG14_v1.0.xlsx / Testing Guideline, rows 1-14",
+ "_target": "Odoo 19 only (the workbook describes the v19 AvaTax surface; the v15 OCA fork has different fields and methods)",
+ "_policy": "AUTOMATION_CONVENTIONS rule 4 says a test whose essence needs an external system must be a blocked stub. Twelve of these fourteen cases ARE the Avalara call, so a literal reading would leave FG-05 permanently unverified. Approved deviation: the cases run for real against the Avalara SANDBOX ONLY, behind tests/fg05/common.py::require_sandbox, which BLOCKS unless the company has Use AvaTax on, avalara_environment == 'sandbox', and both credentials readable as set. A production-pointed company is always BLOCKED, never run.",
+
+ "TC-DAT-017": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-DAT-017",
+  "reason": "Setup verification, read-only. Fully offline except workbook step 3 (Test connection), which is gated on the same sandbox conditions and reported as NOT EVALUATED rather than blocking the other seven steps. Adaptation: the workbook compares against a Novobi printout the platform does not hold, so the test asserts every structural invariant that does not need it and logs the full captured inventory (fiscal positions + both AvaTax account codes, category mappings, partner exemptions, company flags) as a CSV artifact for the human tick-off."
+ },
+ "TC-TAX-001": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-001",
+  "reason": "Full flow against the sandbox: draft invoice 1,000.00 x 1, Compute Taxes (button_external_tax_calculation), totals block, Avalara Code, Confirm. Posted invoice is left in place per the workbook's State After The Test."
+ },
+ "TC-TAX-002": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-002",
+  "reason": "GATE 3 for the whole feature group. Reads the journal entry, not the invoice: asserts more than one tax line, that the tax lines sum exactly to amount_tax, and that every tax name carries the bracketed authority code the MMG override preserves (a name without it is a FAIL)."
+ },
+ "TC-TAX-003": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-003",
+  "reason": "Counts account.tax records for the authority code before and after a second invoice to the same address, including archived rows so an archived namesake cannot mask a duplicate."
+ },
+ "TC-TAX-007": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-007",
+  "reason": "The only FG-05 case that needs no Avalara credentials, so it is deliberately NOT behind require_sandbox and can be run while waiting for the sandbox. The ship-to address guard is pure server-side Python (mmg_account_avatax_enhancement._check_partner_shipping_address via @api.constrains), so it fires on save; the test handles both the save-time and compute-time timings. The two Compute Taxes presses that would reach Avalara are individually sandbox-gated."
+ },
+ "TC-TAX-008": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-008",
+  "reason": "Quotation tax preview, 2,000.00 x 1: non-zero Taxes, Total == Untaxed + Taxes, Avalara Code present, no error."
+ },
+ "TC-TAX-009": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-009",
+  "reason": "Two-address comparison on one quotation (Phoenix AZ vs Missoula MT). Builds its own quotation instead of continuing TC-TAX-008's, because the platform forbids depending on another test's fixtures."
+ },
+ "TC-TAX-010": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-010",
+  "reason": "Order-to-invoice carry-over, all three figures compared to the cent. Builds the starting state the workbook chain hands over (Missoula MT, 2,000.00 x 1). The invoice's own Avalara Code is asserted non-empty and deliberately NOT asserted equal to the order's, because the workbook says a difference is correct."
+ },
+ "TC-TAX-011": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-011",
+  "reason": "Partially provable in Odoo. Asserted here: Commit Transactions is on (BLOCKED if not), the posted invoice has a non-empty Avalara Code and non-zero tax, and a computed-but-unposted invoice stays draft with commit False. RESIDUAL MANUAL STEP, printed into the execution log with both codes and both figures: sign in to the Avalara SANDBOX portal and confirm the posted document is present and committed and that Avalara's total tax matches. The platform cannot reach the portal."
+ },
+ "TC-TAX-013": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-013",
+  "reason": "Exempt customer vs a taxable control customer in the same state, both at 1,000.00. The control is a real assertion, not a log line, because a zero on both means AvaTax is not calculating at all. BLOCKED (not FAILED) when the company has no usable avatax.exemption; the workbook's own remedy (Sync Parameters) is named in the reason but never executed, since it writes records and calls Avalara."
+ },
+ "TC-TAX-014": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-014",
+  "reason": "Adaptation: the workbook mutates a LIVE product category and its own If-It-Fails column warns that leaving a test code on one mis-taxes everything in it. The test creates an FG05 product category and switches that instead, which proves the same behaviour with none of the risk, and still captures/restores/asserts the original value in a finally block."
+ },
+ "TC-TAX-015": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-015",
+  "reason": "Invoice tax line on the Avatax Invoice Account, credit-note tax line on the Avatax Refund Account, amounts equal in absolute value (signs differ between out_invoice and out_refund). BLOCKED when the fiscal position has only one account or the two are the same, pointing at TC-DAT-017 as the owner of that setup gap. Builds and posts its own source invoice."
+ },
+ "TC-TAX-016": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-016",
+  "reason": "Mixed taxable (1,000.00) and exempt (500.00) lines. The 'tax on the taxable line only' expectation is proved against a control invoice containing just the taxable line, rather than by a ratio."
+ },
+ "TC-TAX-017": {
+  "decision": "implemented",
+  "test_id": "TEST-FG05-TAX-017",
+  "reason": "Deliberate break-and-restore of the API KEY, the highest-risk case in FG-05. Safety: the key's readability is probed BEFORE any write and the test BLOCKS if it cannot be read back (an unrestorable key must never be overwritten); it also BLOCKS if the key already reads as the invalid string, which means an earlier run did not restore. The restore flag is armed before the write, so a timeout after the server commits still triggers the restore. The restore runs in a finally block and is asserted by SHA-256 fingerprint, so a failed restore is a visible FAILED check. No credential value ever reaches a log, an assertion or an artifact."
+ }
+}
