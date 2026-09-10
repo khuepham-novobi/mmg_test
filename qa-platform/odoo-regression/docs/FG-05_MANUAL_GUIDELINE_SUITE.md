@@ -79,19 +79,65 @@ already produce that sequence.
 The suite is **Odoo 19 only**. On any other target every case reports BLOCKED
 with a reason, by design.
 
+### 3.0 Deploying on a fresh machine — what git does NOT bring
+
+`.gitignore` excludes the files that carry every target and credential, so a
+clean `git pull` gives you the test code and **no way to reach a database**.
+Recreate these four by hand:
+
+| Missing after pull | Why | What to do |
+|---|---|---|
+| `config/local.yaml` | gitignored | Copy `config/local.yaml.example`, fill in the `ODOO19_*` block below |
+| `.env` | gitignored | Copy `.env.example` — or skip it and put everything in `local.yaml`; real env vars win over both |
+| `venv/` | gitignored | `python -m venv venv` then `venv\Scripts\python.exe -m pip install -r requirements.txt` (Python 3.10+) |
+| `data/` | gitignored | Created automatically. `data/results.db` (SQLite) is built on first start — nothing to restore |
+
+Two things you do **not** need for FG-05:
+
+- **`playwright install`** — all 14 cases are `API`/`DATA` kind and drive Odoo
+  over JSON-RPC. No browser is launched. (`pip install` still pulls the
+  library; you just never need to download Chromium.)
+- **`scripts/sync_registry.py` and the Excel workbook** — the platform boots
+  fine without `data/test_registry.json` (`store.load_registry` returns `0`
+  when the file is absent), and the RUN path resolves tests from the
+  **`@test_case` code registry**, not from the workbook. Running by test id
+  or by feature `FG-05` works with no Excel present.
+  The only thing you lose is the `#/feature/FG-05` dashboard page, which reads
+  workbook rows. Use `#/tests` instead, or copy the workbook over and run the
+  sync script if you want the dashboard populated.
+
 ### 3.1 Point the runner at v19
 
-Add to `config/local.yaml` (not committed):
+Add to `config/local.yaml`:
 
 ```yaml
 env:
-  ODOO19_URL: http://localhost:8076
+  ODOO19_URL: http://localhost:8076      # the port your v19 server listens on
   ODOO19_DB: mmg_qa19
-  ODOO19_USERNAME: admin
-  ODOO19_PASSWORD: <admin password>
+  ODOO19_USERNAME: <a real login>        # NOT necessarily "admin" — see below
+  ODOO19_PASSWORD: <that user's password>
 ```
 
-`ODOO19_PG_*` is **not** needed — this suite uses no SQL.
+Three things that will bite you here:
+
+1. **The default is wrong.** With no `ODOO19_URL` set, `environments.yaml`
+   falls back to `http://localhost:8019` / db `odoo19_test`. If your server is
+   on 8076, every test reports `BLOCKED / ENVIRONMENT` — *"Odoo 19 unreachable
+   at http://localhost:8019"* — before a single test body runs. That is the
+   runner's preflight refusing to invent a verdict, not a broken test.
+2. **`admin` is often not a valid login on a production restore.** On the
+   `mmg_19` restore, `res.users` id 1 is `__system__` and **inactive**; the
+   real administrator is `kathleen@medicinemangallery.com` (id 2). Check with:
+   `SELECT id, login, active FROM res_users WHERE id IN (1,2);`
+3. **The runner user must be in `base.group_system`.**
+   `res.company.avalara_api_id` / `avalara_api_key` carry
+   `groups='base.group_system'`, so a non-system user simply does not receive
+   those fields. TC-DAT-017 would report them "not set", and TC-TAX-017 BLOCKS
+   outright (it refuses to overwrite a key it cannot read back and therefore
+   could not restore).
+
+`ODOO19_PG_*` is **not** needed — this suite uses no SQL (`ctx.sql` is
+deliberately unused; it would BLOCK when `pg_*` is unconfigured).
 
 ### 3.2 Use a clone, not the restore itself
 
