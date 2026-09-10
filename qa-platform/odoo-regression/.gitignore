@@ -12,3 +12,9 @@ artifacts/
 # reports/data/, which silently excluded every fgXX_feasibility.json.
 /data/
 .pytest_cache/
+
+# docker build transcript produced by `docker compose build > build.log`
+build.log
+# a natively-run instance's own Odoo home (conf, filestore, logs) --
+# 21k files of runtime state, never source
+instances/

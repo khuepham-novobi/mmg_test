@@ -1,0 +1,58 @@
+name: mmg-qa
+
+services:
+  # -------------------------------------------------------------- mmg-qa --
+  # The automated regression runner (Playwright). Separate from the client
+  # UAT tracker at mmg-test.odoovietnam.net: this one DRIVES Odoo, the
+  # tracker only records what a human saw. The tracker's Run buttons call
+  # this service over the Docker network as http://mmg-qa:7200.
+  mmg-qa:
+    build:
+      context: .
+    image: mmg/qa-platform:latest
+    container_name: mmg-qa
+    ports:
+      # 127.0.0.1 only. 7200: DTO's qa-platform holds 7000 and the MMG UAT
+      # tracker holds 7100.
+      - "127.0.0.1:7200:7200"
+    volumes:
+      # Live source mount — edit on Windows, no rebuild for code changes.
+      - .:/app
+      # Keep the image's site-packages and the Linux venv in the source tree
+      # from shadowing each other.
+      - /app/venv
+      # Run history and evidence survive a rebuild.
+      - qa-data:/app/data
+      - qa-artifacts:/app/artifacts
+      # v19 custom source, read-only, for the STATIC_ANALYSIS style checks.
+      - ../../../mmg_19/mmg_19-custom:/src/mmg19:ro
+      - ../../../mmg_15/custom-mmg:/src/mmg15:ro
+    environment:
+      HEADLESS: "true"
+      RUNNER_HOST: 0.0.0.0
+      RUNNER_PORT: "7200"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7200/api/tests > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    networks:
+      - default
+      - mmg
+    restart: unless-stopped
+
+volumes:
+  qa-data:
+  qa-artifacts:
+
+networks:
+  default:
+  mmg:
+    # Network of D:\project\mmg\docker\docker-compose.yml — lets this
+    # container reach the instances under test by service name
+    # (odoo19:8069, odoo15:8069) and Postgres at db:5432.
+    external: true
+    name: mmg_default
