@@ -113,6 +113,7 @@ import csv
 import re
 
 from adapters.base import OdooRPCError
+from framework.context import AssertionFailed
 from framework.registry import test_case
 from tests.fg05.common import (MODULE, WORKFLOW, WORKFLOW_NAME,
                                company_avatax_config, require_v19, trace)
@@ -138,6 +139,42 @@ CSV_LIMIT = 500    # rows captured into the evidence CSV per section
 TAG_RE = re.compile(r"<[^>]+>")
 
 INVENTORY_CSV = "TC-DAT-017-avatax-setup-inventory.csv"
+
+
+def _audit(ctx, findings, name, expected, actual):
+    """``ctx.check`` that records the gap and lets the audit carry on.
+
+    TC-DAT-017 is a configuration AUDIT, and the client guideline says to run
+    it FIRST because every other FG-05 case depends on its result. A plain
+    ``ctx.check`` raises on the first mismatch, so a single unticked box ended
+    the run before the fiscal positions, AvaTax categories and customer
+    exemptions were ever looked at — forcing a fix-one-thing-and-re-run loop
+    through exactly the gaps this case exists to list in one pass.
+
+    The assertion is still recorded in full: ``TestContext.check`` appends to
+    ``ctx.assertions`` and emits the ASSERTION event BEFORE it raises, so the
+    evidence keeps expected-vs-actual per line. Only the abort is deferred —
+    the collected findings are asserted together at the end of the audit, so
+    the verdict is unchanged.
+
+    ``ctx.blocked()`` / ``ctx.skip()`` raise ``BlockedTest`` / ``SkipTest``
+    and are deliberately NOT caught: a precondition that cannot be evaluated
+    must still stop the case.
+    """
+    try:
+        ctx.check(name, expected, actual)
+    except AssertionFailed as exc:
+        findings.append(str(exc))
+        ctx.log(f"AUDIT FINDING — {exc}")
+
+
+def _audit_true(ctx, findings, name, condition, actual_desc=""):
+    """``ctx.check_true`` counterpart of :func:`_audit`."""
+    try:
+        ctx.check_true(name, condition, actual_desc=actual_desc)
+    except AssertionFailed as exc:
+        findings.append(str(exc))
+        ctx.log(f"AUDIT FINDING — {exc}")
 
 
 def _m2o(value):
@@ -324,6 +361,7 @@ def test_dat_017(ctx):
     rpc = ctx.adapter.rpc
     evidence = []   # (section, key, value) rows -> CSV artifact
     residual = []   # comparisons only the Novobi printout can settle
+    findings = []  # every configuration gap, reported together
 
     with ctx.step("Precondition (workbook): Odoo 19 with account_avatax "
                   "installed and a company country that shows the AvaTax "
@@ -357,12 +395,12 @@ def test_dat_017(ctx):
                       "then the seven values on the block"):
             company_fields = _fields_present(rpc, "res.company",
                                              COMPANY_SETTING_FIELDS)
-            ctx.check("AvaTax settings fields readable on res.company", [],
+            _audit(ctx, findings, "AvaTax settings fields readable on res.company", [],
                       [f for f in COMPANY_SETTING_FIELDS
                        if f not in company_fields])
 
             # Expected Result line 1, first half.
-            ctx.check("'Use AvaTax' is ticked "
+            _audit(ctx, findings, "'Use AvaTax' is ticked "
                       "(res.company.setting_account_avatax)",
                       True, config["use_avatax"])
 
@@ -430,11 +468,11 @@ def test_dat_017(ctx):
             # are ticked off against the printout by the tester; what the
             # platform proves is that all seven are present and readable,
             # and it logs each one above for that comparison.
-            ctx.check("All seven values of workbook step 2 are readable "
+            _audit(ctx, findings, "All seven values of workbook step 2 are readable "
                       "on this database", [],
                       [label for label, ok in readable if not ok])
 
-            ctx.check_true(
+            _audit_true(ctx, findings, 
                 "Avalara Environment is one of the two AvaTax environments",
                 config["environment"] in ("sandbox", "production"),
                 actual_desc=f"res.company.avalara_environment = "
@@ -444,14 +482,14 @@ def test_dat_017(ctx):
                         "Avalara environment. No FG-05 case may compute "
                         "tax against it (Read Me, safety rule 1); the "
                         "Test connection step below is skipped too.")
-            ctx.check_true(
+            _audit_true(ctx, findings, 
                 "Avalara API ID is set (value never recorded)",
                 config["api_id"] == "set",
                 actual_desc=f"res.company.avalara_api_id reads "
                             f"{config['api_id']!r}; credential fields "
                             f"readable by the runner user "
                             f"(base.group_system): {creds}")
-            ctx.check_true(
+            _audit_true(ctx, findings, 
                 "Avalara API KEY is set (value never recorded)",
                 config["api_key"] == "set",
                 actual_desc=f"res.company.avalara_api_key reads "
@@ -476,7 +514,7 @@ def test_dat_017(ctx):
                       "of Accounts"):
             fp_fields = _fields_present(rpc, "account.fiscal.position",
                                         FISCAL_POSITION_FIELDS)
-            ctx.check("AvaTax fields present on account.fiscal.position",
+            _audit(ctx, findings, "AvaTax fields present on account.fiscal.position",
                       [], [f for f in FISCAL_POSITION_FIELDS
                            if f not in fp_fields])
 
@@ -522,26 +560,26 @@ def test_dat_017(ctx):
                                  f"refund_account={ref_code}"))
 
             # Expected Result line 3.
-            ctx.check_true(
+            _audit_true(ctx, findings, 
                 "At least one fiscal position has 'Use AvaTax API' ticked",
                 bool(positions),
                 actual_desc=f"{len(positions)} account.fiscal.position "
                             f"record(s) with is_avatax=True")
-            ctx.check(
+            _audit(ctx, findings, 
                 "Every AvaTax fiscal position has an Avatax Invoice "
                 "Account", [],
                 sorted(fp["name"] or f"#{fp['id']}" for fp in positions
                        if not _m2o(fp["avatax_invoice_account_id"])))
-            ctx.check(
+            _audit(ctx, findings, 
                 "Every AvaTax fiscal position has an Avatax Refund "
                 "Account", [],
                 sorted(fp["name"] or f"#{fp['id']}" for fp in positions
                        if not _m2o(fp["avatax_refund_account_id"])))
-            ctx.check(
+            _audit(ctx, findings, 
                 "Every Avatax account referenced by those fiscal "
                 "positions exists in the Chart of Accounts (step 6)", [],
                 [aid for aid in account_ids if aid not in accounts])
-            ctx.check(
+            _audit(ctx, findings, 
                 "Every Avatax account referenced by those fiscal "
                 "positions has a non-empty code", [],
                 sorted(f"#{aid} {accounts[aid][1]}" for aid in accounts
@@ -555,14 +593,14 @@ def test_dat_017(ctx):
         with ctx.step("Workbook step 7: Avatax Category on the product "
                       "categories reached through a product's Internal "
                       "Category"):
-            ctx.check_true(
+            _audit_true(ctx, findings, 
                 "Model product.avatax.category exists (the v19 AvaTax "
                 "category master)",
                 rpc.model_exists("product.avatax.category"),
                 actual_desc="ir.model lookup for 'product.avatax.category'")
             categ_fields = _fields_present(rpc, "product.category",
                                            ["avatax_category_id"])
-            ctx.check("product.category.avatax_category_id present", [],
+            _audit(ctx, findings, "product.category.avatax_category_id present", [],
                       [f for f in ("avatax_category_id",)
                        if f not in categ_fields])
 
@@ -627,16 +665,16 @@ def test_dat_017(ctx):
                             f"{model}.avatax_category_id ({exc})")
 
             # Expected Result line 4.
-            ctx.check_true(
+            _audit_true(ctx, findings, 
                 "At least one product category still carries an Avatax "
                 "Category", bool(categories),
                 actual_desc=f"{categ_total} product.category record(s) "
                             f"with avatax_category_id set")
-            ctx.check(
+            _audit(ctx, findings, 
                 "Every product.avatax.category referenced by a product "
                 "category still exists", [],
                 [cid for cid in categ_ids if cid not in avatax_categs])
-            ctx.check(
+            _audit(ctx, findings, 
                 "Every product.avatax.category referenced by a product "
                 "category has a non-empty code", [],
                 sorted(f"#{cid} {avatax_categs[cid][1]}"
@@ -650,13 +688,13 @@ def test_dat_017(ctx):
         with ctx.step("Workbook step 8: the tax-exempt customer's Avalara "
                       "Code, Avalara Partner Code and Avalara Exemption "
                       "(Sales & Purchase tab, Sales group)"):
-            ctx.check_true(
+            _audit_true(ctx, findings, 
                 "Model avatax.exemption exists (the v19 exemption master)",
                 rpc.model_exists("avatax.exemption"),
                 actual_desc="ir.model lookup for 'avatax.exemption'")
             partner_fields = _fields_present(rpc, "res.partner",
                                              PARTNER_AVATAX_FIELDS)
-            ctx.check("AvaTax partner fields present on res.partner", [],
+            _audit(ctx, findings, "AvaTax partner fields present on res.partner", [],
                       [f for f in PARTNER_AVATAX_FIELDS
                        if f not in partner_fields])
             ctx.log(f"note — res.partner.avalara_exemption_id is "
@@ -763,7 +801,7 @@ def test_dat_017(ctx):
                 # Expected Result line 5. Both assertions are stated over
                 # the full population (search_count), not over the
                 # CSV_LIMIT evidence window read above.
-                ctx.check_true(
+                _audit_true(ctx, findings, 
                     "At least one customer still carries an Avalara "
                     "Exemption", partner_total > 0,
                     actual_desc=f"{partner_total} res.partner record(s) "
@@ -772,7 +810,7 @@ def test_dat_017(ctx):
                                 f"(full population via search_count; the "
                                 f"capped evidence window listed "
                                 f"{len(partners)})")
-                ctx.check_true(
+                _audit_true(ctx, findings, 
                     "At least one exempt customer carries BOTH an Avalara "
                     "Exemption and an Avalara Partner Code (the "
                     "workbook's exempt customer)",
@@ -784,12 +822,12 @@ def test_dat_017(ctx):
                                 f"evidence window listed {len(partners)}, "
                                 f"{len(partners) - len(no_code)} of which "
                                 f"carry one)")
-                ctx.check(
+                _audit(ctx, findings, 
                     "Every avatax.exemption referenced by a customer "
                     "still exists", [],
                     [eid for eid in exemption_ids
                      if eid not in exemptions])
-                ctx.check(
+                _audit(ctx, findings, 
                     "Every avatax.exemption referenced by a customer has "
                     "a non-empty code", [],
                     sorted(f"#{eid} {exemptions[eid][1]}"
@@ -799,6 +837,22 @@ def test_dat_017(ctx):
                     "workbook step 8 — tick the exempt customer's Avalara "
                     "Exemption and Avalara Partner Code (logged above) "
                     "off against the Novobi printout.")
+
+        # One verdict for the whole audit. Each gap was already recorded
+        # as its own assertion (ctx.check appends and emits BEFORE it
+        # raises), so the evidence keeps expected-vs-actual per line while
+        # the run still reaches every section. TC-DAT-017 is the case the
+        # workbook says to run FIRST precisely so one pass lists
+        # everything that has to be fixed.
+        with ctx.step("Audit summary: every AvaTax configuration gap "
+                      "found, reported together"):
+            if findings:
+                ctx.log(f"{len(findings)} configuration gap(s) found — fix "
+                        f"all of them before re-running FG-05:")
+                for n, finding in enumerate(findings, 1):
+                    ctx.log(f"  {n}. {finding}")
+            # HARD check: this is the one that decides the verdict.
+            ctx.check("AvaTax configuration audit findings", [], findings)
     finally:
         with ctx.step("Evidence: the captured AvaTax inventory the tester "
                       "ticks off against the Novobi printout"):
