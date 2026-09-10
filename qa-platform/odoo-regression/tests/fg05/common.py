@@ -890,6 +890,244 @@ def make_quotation(ctx, partner_id: int, lines, *, fiscal_position_id,
     return order_id
 
 
+# --------------------------------------- MMG auto-invoice on order confirm
+# ``mmg_sale_auto_create_invoice`` overrides ``sale.order.action_confirm`` to
+# call ``_create_invoices()`` on every order whose company carries
+# ``auto_create_invoice_after_confirming_so`` (models/sale_order.py), and that
+# flag is ON for the acting company on the MMG v19 database. Confirming an
+# order therefore raises a full-value DRAFT invoice inside action_confirm.
+# ``sale.order.line._prepare_qty_invoiced`` counts a DRAFT invoice line — it
+# excludes only ``move_id.state == 'cancel'`` (addons/sale/models/
+# sale_order_line.py:1007-1017) — so every line then reads fully invoiced,
+# ``_get_invoiceable_lines`` returns nothing, and a case whose own workbook
+# step is "Create Invoice > Regular invoice" is refused at
+# addons/sale/models/sale_order.py:1615-1616.
+#
+# THE ERROR TEXT DOES NOT NAME THE CAUSE.
+# ``_nothing_to_invoice_error_message`` (addons/sale/models/
+# sale_order.py:1485-1493) is one fixed five-bullet block with no branching,
+# and this platform's transport keeps only its LAST line
+# (``str(message).strip().splitlines()[-1]``, adapters/base.py:149-156). The
+# failure therefore surfaces as "- For services (and other products), change
+# the 'Invoicing Policy' to 'Prepaid/Fixed Price'", which is merely that
+# block's final bullet. The invoicing policy is NOT the cause and must not be
+# written: FG05 fixture products are created as ``type='consu'``
+# (``Odoo19Adapter.storable_product_values``) and
+# ``product.template._compute_invoice_policy`` (addons/sale/models/
+# product_template.py:163-164) forces ``invoice_policy='order'`` for exactly
+# that type, so the field already holds the value the bullet asks for and
+# writing it would be a no-op.
+MODULE_AUTO_INVOICE = "mmg_sale_auto_create_invoice"
+AUTO_INVOICE_FIELD = "auto_create_invoice_after_confirming_so"
+
+
+def auto_invoice_flag(ctx, company_id=None) -> dict:
+    """Report :data:`AUTO_INVOICE_FIELD` on the acting company.
+
+    Returns ``{"present", "enabled", "company_id"}``. ``present`` is False on
+    a database without ``mmg_sale_auto_create_invoice``, which reads as
+    ``enabled=False`` — the stock-Odoo branch. Never raises: this is only ever
+    used to EXPLAIN an observed invoice in evidence, never to decide whether
+    one exists.
+    """
+    rpc = ctx.adapter.rpc
+    if company_id is None:
+        try:
+            company_id = company_avatax_config(ctx)["company_id"]
+        except (OdooRPCError, IndexError, KeyError):
+            company_id = None
+    present, enabled = False, False
+    try:
+        present = rpc.field_exists("res.company", AUTO_INVOICE_FIELD)
+        if present and company_id:
+            enabled = bool(rpc.read("res.company", [company_id],
+                                    [AUTO_INVOICE_FIELD])[0]
+                           .get(AUTO_INVOICE_FIELD))
+    except (OdooRPCError, IndexError, KeyError) as exc:
+        ctx.log(f"[auto-invoice] could not read {AUTO_INVOICE_FIELD} on "
+                f"res.company#{company_id} ({exc}) — reported as absent")
+    return {"present": present, "enabled": enabled, "company_id": company_id}
+
+
+def order_invoice_rows(ctx, order_id: int) -> list[dict]:
+    """Every invoice currently linked to one sales order, with its state."""
+    rpc = ctx.adapter.rpc
+    invoice_ids = rpc.read("sale.order", [order_id],
+                           ["invoice_ids"])[0].get("invoice_ids") or []
+    if not invoice_ids:
+        return []
+    rows = rpc.read("account.move", invoice_ids,
+                    ["name", "state", "move_type", "amount_total"])
+    return [{"id": r["id"], "name": r.get("name") or "",
+             "state": r.get("state") or "",
+             "move_type": r.get("move_type") or "",
+             "amount_total": round(float(r.get("amount_total") or 0.0), 2)}
+            for r in rows]
+
+
+def drop_draft_order_invoices(ctx, order_id: int) -> tuple[list, list]:
+    """Remove the DRAFT invoices of one FG05 fixture order. ``(removed, kept)``.
+
+    Used only to put a fixture order back into the "confirmed, not yet
+    invoiced" precondition a workbook step assumes, after
+    :data:`MODULE_AUTO_INVOICE` raised an invoice at confirm time. It restores
+    a precondition; it is never a way to make an assertion pass.
+
+    AUTOMATION_CONVENTIONS rule 3 is kept. The only moves it can reach are
+    those linked to the order handed to it — which the calling test's own
+    ``action_confirm`` created moments earlier on its own marker-named fixture
+    — and a move that is not DRAFT is never touched: it comes back in ``kept``
+    so the caller can BLOCK rather than invent a starting state.
+
+    SAFETY — deleting an AvaTax move calls Avalara.
+    ``account_external_tax/models/account_move.py:14-16`` runs
+    ``_void_external_taxes()`` BEFORE ``super().unlink()``, and
+    ``account_avatax``'s ``_change_avatax_state('void')`` sends
+    ``client.void_transaction()`` for every ``is_avatax`` record with no state
+    test. Two consequences, both handled here:
+
+    * The same sandbox guard :func:`sweep_fg05` and :func:`cleanup` apply is
+      applied here: an AvaTax-flagged draft is left in place unless the
+      resolved Avalara host is provably the sandbox.
+    * The move being removed has no transaction at Avalara to lose. Nothing
+      computes external taxes when an invoice is CREATED —
+      ``account_external_tax`` calls
+      ``_get_and_set_external_taxes_on_eligible_records()`` only from
+      ``_post()`` (account_move.py:18-21) and from the Compute Taxes button
+      (account_external_tax_mixin.py:176) — and v19 handles precisely that
+      case: the void response's ``EntityNotFoundError`` is logged and skipped,
+      "There's nothing to void when a draft record is deleted without ever
+      being sent to Avatax" (account_avatax/models/
+      account_external_tax_mixin.py:262-265). The outbound call still happens,
+      against the sandbox the caller already proved with
+      :func:`require_sandbox`.
+    """
+    rpc = ctx.adapter.rpc
+    rows = order_invoice_rows(ctx, order_id)
+    drafts = [r for r in rows if r["state"] == "draft"]
+    risky = set()
+    if drafts:
+        try:
+            risky = set(rpc.search(
+                "account.move",
+                [("id", "in", [r["id"] for r in drafts]),
+                 ("fiscal_position_id.is_avatax", "=", True)]))
+        except OdooRPCError as exc:
+            risky = {r["id"] for r in drafts}
+            ctx.log(f"[auto-invoice] could not classify {sorted(risky)} as "
+                    f"AvaTax moves ({exc}) — all treated as AvaTax, which is "
+                    f"the safe side of the sandbox guard")
+    safe, why_unsafe = True, ""
+    if risky:
+        safe, why_unsafe = _avatax_calls_are_safe(ctx)
+
+    removed, kept = [], []
+    for row in rows:
+        if row["state"] != "draft":
+            kept.append(row)
+            ctx.log(f"[auto-invoice] invoice {row['name']} (#{row['id']}) is "
+                    f"{row['state']!r}, not draft — left in place")
+            continue
+        if row["id"] in risky and not safe:
+            kept.append(row)
+            ctx.log(f"[auto-invoice] AvaTax draft {row['name']} "
+                    f"(#{row['id']}) LEFT IN PLACE: unlink sends Avalara "
+                    f"void_transaction and the target is not provably the "
+                    f"sandbox — {why_unsafe}")
+            continue
+        try:
+            rpc.unlink("account.move", [row["id"]])
+        except OdooRPCError as exc:
+            kept.append(row)
+            ctx.log(f"[auto-invoice] draft invoice {row['name']} "
+                    f"(#{row['id']}) could not be removed ({exc})")
+        else:
+            removed.append(row)
+            ctx.log(f"[auto-invoice] removed the draft invoice "
+                    f"{row['name']} (#{row['id']}, {row['amount_total']:.2f}) "
+                    f"that action_confirm auto-created, restoring the "
+                    f"workbook's uninvoiced precondition on order #{order_id}")
+    return removed, kept
+
+
+def restore_uninvoiced_order(ctx, order_id: int, detail: str) -> list[dict]:
+    """Give a just-confirmed FG05 order back its INVOICEABLE quantity.
+
+    For a case whose own workbook step is *Create Invoice > Regular invoice*:
+    it has to DRIVE that step to prove anything about it, so the order must
+    still have something to invoice when it gets there. See the
+    :data:`MODULE_AUTO_INVOICE` note above for why it does not.
+
+    Gated on what the order ACTUALLY carries, not on the company flag — the
+    flag is read only to name the cause in evidence. An order the calling test
+    confirmed seconds ago carries nothing that test did not cause, so the
+    observed state is the more reliable trigger, and a database where the
+    field is unreadable but something still auto-invoices is then reported
+    rather than left to fail on Odoo's misleading message.
+
+    Removing an auto-created DRAFT restores the workbook's precondition; it is
+    never a way to make an assertion pass. Every assertion in the calling case
+    is still made afterwards, against the invoice that case creates itself. A
+    move that is not draft is never touched: the case BLOCKS instead, because
+    the workbook describes no such starting state and inventing one would put
+    a fabricated verdict in the report.
+
+    Returns the rows removed — empty when nothing was auto-created, which is
+    the stock-Odoo path and leaves the case running exactly as written.
+    """
+    rpc = ctx.adapter.rpc
+    raised = order_invoice_rows(ctx, order_id)
+    if not raised:
+        ctx.log(f"order #{order_id} carries no invoice after Confirm — the "
+                f"workbook's precondition for {detail} already holds")
+        return []
+    flag = auto_invoice_flag(ctx)
+    if flag["enabled"]:
+        cause = (f"the acting company (#{flag['company_id']}) has "
+                 f"{AUTO_INVOICE_FIELD} = True, so confirming the order "
+                 f"auto-created it — that is {MODULE_AUTO_INVOICE} working as "
+                 f"designed, an MMG feature the FG-05 workbook does not "
+                 f"describe, and NOT an AvaTax defect")
+    else:
+        cause = (f"{AUTO_INVOICE_FIELD} reads present={flag['present']} "
+                 f"enabled={flag['enabled']} on company "
+                 f"#{flag['company_id']}, so the invoice(s) came from "
+                 f"something other than {MODULE_AUTO_INVOICE}")
+    ctx.log(f"confirming order #{order_id} produced "
+            f"{[(r['name'], r['state']) for r in raised]}; {cause}. This "
+            f"case's own step is 'Create Invoice > Regular invoice' "
+            f"({detail}), which needs the order's quantity still to be "
+            f"invoiceable, so the auto-created draft is removed to restore "
+            f"the workbook's precondition")
+    removed, kept = drop_draft_order_invoices(ctx, order_id)
+    try:
+        status = rpc.read("sale.order", [order_id],
+                          ["invoice_status"])[0].get("invoice_status") or ""
+    except (OdooRPCError, IndexError, KeyError) as exc:
+        status = f"unreadable ({exc})"
+    # ``invoice_status`` is the whole gate: it reads 'invoiced' only while
+    # every line is still fully invoiced (addons/sale/models/
+    # sale_order.py:619-626), and a CANCELLED move releases its quantity again
+    # because _prepare_qty_invoiced skips move_id.state == 'cancel'. So a
+    # leftover row in ``kept`` is reported but does not by itself block.
+    if status == "invoiced":
+        ctx.blocked(
+            f"this case's workbook step is 'Create Invoice > Regular invoice' "
+            f"and the order cannot be returned to the CONFIRMED, UNINVOICED "
+            f"state that step needs ({detail}). Confirming it auto-raised "
+            f"{[(r['name'], r['state']) for r in raised]} — {cause} — and "
+            f"after removing {[r['name'] for r in removed] or 'nothing'} the "
+            f"order still reads invoice_status={status!r} with "
+            f"{[(r['name'], r['state']) for r in kept]} attached. Non-draft "
+            f"moves are deliberately left alone (AUTOMATION_CONVENTIONS rule "
+            f"3; account_external_tax.unlink would also void their Avalara "
+            f"transaction before failing)")
+    ctx.log(f"order #{order_id} is invoiceable again "
+            f"(invoice_status={status!r}) after removing "
+            f"{[r['name'] for r in removed]}")
+    return removed
+
+
 # ------------------------------------------------------------- document ops
 def compute_taxes(ctx, model: str, record_id: int):
     """The workbook's 'Compute Taxes' button.

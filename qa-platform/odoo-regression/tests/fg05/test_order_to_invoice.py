@@ -133,6 +133,56 @@ Documented adaptations (business assertions unchanged)
    leaves their warehouse ``None`` and no line-level address is sent — which
    is why the invoice cases in this suite compute tax correctly today and must
    keep doing so.
+6. **TC-TAX-010's step 3 also raises an invoice by itself.** MMG's
+   ``mmg_sale_auto_create_invoice`` overrides ``sale.order.action_confirm``
+   to call ``_create_invoices()`` whenever the acting company carries
+   ``auto_create_invoice_after_confirming_so``, and that flag is ON for the
+   acting company on the MMG v19 database. Workbook step 3 (*Confirm*)
+   therefore produces a full-value DRAFT invoice on its own,
+   ``_prepare_qty_invoiced`` counts draft invoice lines (addons/sale/models/
+   sale_order_line.py:1007-1017 excludes only ``cancel``), and step 4's own
+   ``create_invoices()`` then finds nothing invoiceable and is refused at
+   ``sale_order.py:1615-1616``. That refusal surfaces here as *"For services
+   (and other products), change the 'Invoicing Policy' to 'Prepaid/Fixed
+   Price'"*, which is **not a diagnosis**: it is the last of five fixed
+   bullets in ``_nothing_to_invoice_error_message`` (:1485-1493), and this
+   platform's transport keeps only a message's last line
+   (adapters/base.py:149-156). The invoicing policy is not the cause and is
+   not touched — FG05 products are ``type='consu'`` and
+   ``product.template._compute_invoice_policy`` (addons/sale/models/
+   product_template.py:163-164) already forces ``invoice_policy='order'``
+   for that type, so writing the field would be a no-op.
+
+   The auto-created DRAFT is therefore removed at the end of step 3, through
+   :func:`~tests.fg05.common.restore_uninvoiced_order`, mirroring the fix
+   FG-06 already carries (``tests/fg06/common.py``, used by TC-DEP-004 and
+   TC-DEP-007). **Why remove it rather than reuse it.** The auto-created
+   invoice is content-identical here — the wizard's ``'delivered'`` branch
+   delegates to the very same ``sale.order._create_invoices()``
+   (addons/sale/wizard/sale_make_invoice_advance.py:138-141), and with no
+   down payment on the order its ``final`` / ``grouped`` arguments make no
+   difference — so reusing it was weighed seriously. It was rejected because
+   the case would then never perform workbook step 4 at all. TC-TAX-010's
+   subject is the invoice **the tester creates from the order**; a case that
+   only inspected a document MMG's automation produced could not fail if
+   ``sale.advance.payment.inv`` itself regressed (its AvaTax-specific
+   grouping key, ``account_avatax_sale._get_invoice_grouping_keys``, is
+   reachable only down that path), and the equivalence just described would
+   become an unstated assumption that holds solely for this fixture's shape.
+   Removing the draft restores the workbook's own stated precondition — a
+   confirmed order still waiting to be invoiced — and every assertion below
+   is then made, unchanged, against the invoice this case creates itself.
+   The cost is accepted knowingly and is small. Unlink voids the move's
+   Avalara transaction first (adaptation 4), but a draft that has only just
+   been created has none to lose: external taxes are computed only in
+   ``_post()`` (account_external_tax/models/account_move.py:18-21) and on the
+   Compute Taxes button (``…/account_external_tax_mixin.py:176``), never on
+   ``create()``, and v19 skips precisely this case on ``EntityNotFoundError``
+   — "There's nothing to void when a draft record is deleted without ever
+   being sent to Avatax" (account_avatax/models/
+   account_external_tax_mixin.py:262-265). The call is still outbound, so it
+   runs under the same sandbox guard ``sweep_fg05`` and ``cleanup`` already
+   apply. A non-draft invoice is never touched: the case BLOCKS instead.
 """
 from __future__ import annotations
 
@@ -144,7 +194,7 @@ from tests.fg05.common import (ADDRESS_MISSOULA_MT, ADDRESS_PHOENIX_AZ, MODULE,
                                make_product, make_quotation,
                                require_avatax_fiscal_position,
                                require_sandbox, require_warehouse_shipfrom,
-                               sweep_fg05, trace)
+                               restore_uninvoiced_order, sweep_fg05, trace)
 
 # The wizard behind the sale order's "Create Invoice" button
 # (addons/sale/views/sale_order_views.xml:272-279 opens
@@ -315,6 +365,17 @@ def test_tax_010(ctx):
                     f"Untaxed={confirmed['untaxed']:.2f} "
                     f"Taxes={confirmed['tax']:.2f} "
                     f"Total={confirmed['total']:.2f}")
+            # Adaptation 6: on the MMG database Confirm ALSO raises a full
+            # draft invoice by itself (mmg_sale_auto_create_invoice), which
+            # consumes the quantity step 4 needs. The auto-created draft is
+            # removed here so step 4 can perform the workbook's own action;
+            # nothing else about the case changes, and on a database with the
+            # flag off this is a no-op. See the module docstring and
+            # tests/fg05/common.py::restore_uninvoiced_order.
+            restore_uninvoiced_order(
+                ctx, order_id,
+                "workbook step 4 — 'Create Invoice > Regular invoice', whose "
+                "result steps 5-8 read")
 
         with ctx.step("Step 4 (workbook): Create Invoice > Regular invoice"):
             wizard_id = rpc.create(ADVANCE_PAYMENT_WIZARD, {
@@ -324,6 +385,10 @@ def test_tax_010(ctx):
             rpc.call(ADVANCE_PAYMENT_WIZARD, "create_invoices", [wizard_id])
             invoice_ids = rpc.read("sale.order", [order_id],
                                    ["invoice_ids"])[0]["invoice_ids"]
+            # Exactly one, and it is the one this step just made: step 3's
+            # restore left the order with no invoice attached (adaptation 6),
+            # so a second row here would mean the auto-created draft survived
+            # and the figures below would be read off the wrong document.
             ctx.check("invoices created by Create Invoice > Regular invoice",
                       1, len(invoice_ids))
             invoice_id = invoice_ids[0]
