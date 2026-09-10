@@ -50,15 +50,38 @@ model existence — see :func:`require_account_reports`.
 How this suite drives Odoo
 --------------------------
 The platform talks to Odoo over ``/web/dataset/call_kw``, the endpoint the
-browser itself uses (``adapters/base.py``). Two consequences:
+browser itself uses (``adapters/base.py``). Three consequences:
 
 1. **No leading-underscore method may be called.** ``odoo/service/model.py``
    refuses a private method before it is even looked up. Everything this
    module calls is public: ``get_options``, ``get_report_information``,
    ``dispatch_report_action``, ``get_wkhtmltopdf_state``, ``load_menus``,
-   ``check_access``, ``action_post``, ``action_create_payments``,
-   ``action_generate``.
-2. **``@api.onchange`` does not fire on ``create()``/``write()``.** Where a
+   ``has_access``, ``has_group``, ``onchange``, ``action_post``,
+   ``action_create_payments``, ``action_generate``. ``check_access`` is NOT
+   among them: it is ``@api.private`` in v19 (``odoo/orm/models.py:4099``),
+   so every access probe here uses ``has_access``.
+2. **Every RECORD-style method needs a leading ids argument.** ``call_kw``
+   splits the argument list itself: only a method carrying ``_api_model``
+   (set by ``@api.model`` and ``@api.model_create_multi`` —
+   ``odoo/orm/decorators.py:324, 371``) receives the whole list; for anything
+   else ``ids, args = args[0], args[1:]`` and the FIRST positional is
+   consumed as the recordset (``odoo/service/model.py:82-87``, the split is
+   line 86). Omit it and Odoo browses the real first argument, then calls the
+   method one argument short — the failure surfaces as "missing 1 required
+   positional argument".
+
+   * ids-first here: ``onchange`` (``[]`` — it is undecorated,
+     ``addons/web/models/models.py:1973``), ``res.users.has_group``
+     (``[uid]`` — ``@api.readonly`` only, and it calls ``ensure_one()``,
+     ``odoo/addons/base/models/res_users.py:1065-1075``), ``has_access``,
+     ``read``, ``write``, ``get_options``, ``get_report_information``,
+     ``dispatch_report_action``, ``action_post``,
+     ``action_create_payments``, ``action_generate``.
+   * NO ids, correctly: ``create`` (``@api.model_create_multi``),
+     ``fields_get``, ``default_get``, ``search_count``, ``get_view``,
+     ``get_views``, ``formatted_read_group``, ``load_menus``,
+     ``get_wkhtmltopdf_state`` — all ``@api.model``.
+3. **``@api.onchange`` does not fire on ``create()``/``write()``.** Where a
    workbook expectation is "the field fills itself in", use
    :func:`form_defaults` / :func:`onchange_values`, which call the public
    ``onchange`` the form view itself calls (``addons/web/models/
@@ -545,17 +568,33 @@ def form_defaults(ctx, model: str, names, context: dict) -> dict:
     ``default_get`` for every field in the spec, then runs the onchange
     methods over all of them (``addons/web/models/models.py:2019-2031``).
     That is precisely what the workbook means by "the pop-up offers…".
+
+    **The leading ``[]`` is the ids argument and is mandatory.**
+    ``BaseModel.onchange`` (``addons/web/models/models.py:1973``) carries no
+    ``@api.model``, so ``call_kw`` consumes the first positional as the
+    recordset — ``ids, args = args[0], args[1:]``
+    (``odoo/service/model.py:86``). Sending ``values`` first makes Odoo browse
+    the values dict and then call ``onchange(recs, field_names, fields_spec)``
+    one argument short, failing with
+    ``Base.onchange() missing 1 required positional argument: 'fields_spec'``.
+    An empty ids list is exactly what the web client sends for an unsaved
+    record.
     """
-    payload = ctx.adapter.rpc.call(model, "onchange", {}, [], _spec(names),
+    payload = ctx.adapter.rpc.call(model, "onchange", [], {}, [], _spec(names),
                                    context=context) or {}
     return payload.get("value") or {}
 
 
 def onchange_values(ctx, model: str, values: dict, changed, names,
                     context: dict | None = None) -> dict:
-    """The values a form shows after the user edits ``changed``."""
+    """The values a form shows after the user edits ``changed``.
+
+    Same ids-first rule as :func:`form_defaults`: the leading ``[]`` is the
+    recordset ``call_kw`` slices off before the method is called
+    (``odoo/service/model.py:86``), not part of ``onchange``'s own signature.
+    """
     payload = ctx.adapter.rpc.call(
-        model, "onchange", values, list(changed), _spec(names),
+        model, "onchange", [], values, list(changed), _spec(names),
         context=context or {}) or {}
     return payload.get("value") or {}
 
@@ -590,9 +629,23 @@ def menu_by_xmlid(ctx, xmlid: str) -> dict:
 
 
 def has_group(ctx, xmlid: str) -> bool:
-    """``res.users.has_group`` — public, and the correct precondition probe."""
+    """``res.users.has_group`` — public, and the correct precondition probe.
+
+    **ids-first, and the id must be the calling user's own.** In v19
+    ``has_group`` is a RECORD method — only ``@api.readonly``
+    (``odoo/addons/base/models/res_users.py:1065-1066``) — and it opens with
+    ``ensure_one()`` and refuses any user but ``self.env.user``
+    (``:1073-1078``). ``call_kw`` therefore slices the first positional off as
+    the recordset (``odoo/service/model.py:86``): passing ``xmlid`` alone made
+    Odoo ``browse()`` the string — ``tuple("base.group_x")``,
+    ``odoo/orm/models.py:5892-5898`` — and then call ``has_group`` with no
+    group at all, so every probe raised and this helper answered ``False`` for
+    a user who *is* in the group. Sending ``[rpc.uid]`` is the same recordset
+    the web client sends.
+    """
+    rpc = ctx.adapter.rpc
     try:
-        return bool(ctx.adapter.rpc.call("res.users", "has_group", xmlid))
+        return bool(rpc.call("res.users", "has_group", [rpc.uid], xmlid))
     except OdooRPCError:
         return False
 

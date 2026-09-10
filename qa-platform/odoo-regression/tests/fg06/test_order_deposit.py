@@ -75,12 +75,15 @@ from __future__ import annotations
 
 from adapters.base import OdooRPCError
 from framework.registry import test_case
-from tests.fg06.common import (CUSTOMER_SIDE, MODULE_SALE, OPTION_FIXED,
+from tests.fg06.common import (AUTO_INVOICE_FIELD, CUSTOMER_SIDE,
+                               MODULE_SALE, OPTION_FIXED,
                                OPTION_PERCENTAGE, WORKFLOW, WORKFLOW_NAME,
                                acting_company, cleanup, deposit_popup_state,
-                               deposit_accounts_for_test, field_attrs,
+                               deposit_accounts_for_test,
+                               drop_draft_order_invoices, field_attrs,
                                make_order, make_partner, make_product, money,
-                               open_make_deposit_wizard, order_totals,
+                               open_make_deposit_wizard, order_invoice_rows,
+                               order_totals,
                                payment_row, require_sale_deposit,
                                run_make_deposit_wizard, sweep_fg06, trace,
                                validate_deposit_popup)
@@ -101,7 +104,9 @@ def _build_order(ctx, company, account, label: str, total: float) -> tuple:
     return partner_id, product_id, order_id
 
 
-def _require_confirmed_uninvoiced(ctx, order_id: int, total: float) -> dict:
+def _require_confirmed_uninvoiced(ctx, order_id: int, total: float,
+                                  company: dict, *,
+                                  restore: bool = False) -> dict:
     """Assert the workbook's own precondition on the order it will use.
 
     All three of these hide the Create deposit button by design
@@ -109,14 +114,75 @@ def _require_confirmed_uninvoiced(ctx, order_id: int, total: float) -> dict:
     ``groups="account.group_account_invoice"``,
     ``sale_partner_deposit/views/sale_order_views.xml:9-13``), and the
     workbook's If It Fails names all three as the first things to check.
+
+    MMG AUTO-INVOICE — why "uninvoiced" is not a given on this database
+    ------------------------------------------------------------------
+    ``mmg_sale_auto_create_invoice`` overrides ``sale.order.action_confirm``
+    to call ``_create_invoices()`` on every order whose company carries
+    ``auto_create_invoice_after_confirming_so``
+    (``mmg_sale_auto_create_invoice/models/sale_order.py``), and that flag
+    is ON for the acting company on the target database. Confirming an
+    order therefore raises a draft invoice at once and ``invoice_status``
+    reads ``'invoiced'`` — MMG behaviour the FG-06 workbook does not
+    describe, not a deposit defect. Asserting "not invoiced"
+    unconditionally reported that feature as a product failure on
+    TC-DEP-004/005/016 (and TC-DEP-012 in the currency module), so the
+    check is now conditional on the flag:
+
+    * flag OFF — the workbook's precondition holds as written and is
+      asserted unchanged;
+    * flag ON, ``restore=False`` — the auto-created invoice is logged as
+      expected behaviour and the case proceeds on what it actually needs.
+      Nothing in TC-DEP-005 or TC-DEP-016 reads ``invoice_status``: they
+      are about the deposit figures, and ``action_make_a_deposit`` has no
+      invoice gate of its own
+      (``sale_partner_deposit/models/sale_order.py``);
+    * flag ON, ``restore=True`` — the draft invoice ``action_confirm``
+      just created is removed, putting the order back into the state the
+      workbook describes, and the assertion is then made for real. Used by
+      TC-DEP-004, whose Expected line 1 is that Create deposit is
+      available on the order. If the order cannot be returned to that
+      state the case BLOCKS with the reason rather than passing on a
+      state the workbook never described.
     """
     order = order_totals(ctx, order_id)
     ctx.check("The order is CONFIRMED (state 'sale'), as the workbook "
               "precondition requires", "sale", order["state"])
-    ctx.check_true(
-        "The order is NOT yet invoiced (invoice_status != 'invoiced')",
-        order["invoice_status"] != "invoiced",
-        actual_desc=f"invoice_status = {order['invoice_status']!r}")
+    if company.get("auto_invoice_on_confirm"):
+        raised = order_invoice_rows(ctx, order_id)
+        ctx.log(f"the acting company has {AUTO_INVOICE_FIELD} = True, so "
+                f"confirming this order auto-created "
+                f"{[(r['name'], r['state']) for r in raised]} and "
+                f"invoice_status reads {order['invoice_status']!r}. That "
+                f"is mmg_sale_auto_create_invoice working as designed "
+                f"(models/sale_order.py) — an MMG feature the FG-06 "
+                f"workbook does not describe, NOT a deposit defect.")
+        if restore:
+            removed, kept = drop_draft_order_invoices(ctx, order_id)
+            order = order_totals(ctx, order_id)
+            if order["invoice_status"] == "invoiced":
+                ctx.blocked(
+                    f"this case needs the workbook's CONFIRMED, "
+                    f"UNINVOICED order and the order could not be "
+                    f"returned to it: {AUTO_INVOICE_FIELD} is ON for the "
+                    f"acting company, and after removing "
+                    f"{[r['name'] for r in removed] or 'nothing'} the "
+                    f"order still reads invoice_status='invoiced' with "
+                    f"{[(r['name'], r['state']) for r in kept]} attached")
+            ctx.check_true(
+                "The order is NOT yet invoiced (invoice_status != "
+                "'invoiced') — the invoice mmg_sale_auto_create_invoice "
+                "raised on confirm was removed to restore the workbook's "
+                "precondition",
+                order["invoice_status"] != "invoiced",
+                actual_desc=f"invoice_status = "
+                            f"{order['invoice_status']!r} after removing "
+                            f"{[r['name'] for r in removed]}")
+    else:
+        ctx.check_true(
+            "The order is NOT yet invoiced (invoice_status != 'invoiced')",
+            order["invoice_status"] != "invoiced",
+            actual_desc=f"invoice_status = {order['invoice_status']!r}")
     ctx.check("The order total matches the workbook's Test Data", total,
               order["amount_total"])
     return order
@@ -180,7 +246,8 @@ def test_dep_004(ctx):
         created["res.partner"].append(partner_id)
         created["product.product"].append(product_id)
         created["sale.order"].append(order_id)
-        _require_confirmed_uninvoiced(ctx, order_id, order_total)
+        _require_confirmed_uninvoiced(ctx, order_id, order_total,
+                                      company, restore=True)
 
     try:
         with ctx.step("Step 2 / Expected line 1: Create deposit is present "
@@ -198,6 +265,22 @@ def test_dep_004(ctx):
                 and "Create deposit" in arch,
                 actual_desc=f"{CREATE_DEPOSIT_METHOD} in arch: "
                             f"{f'name=\"{CREATE_DEPOSIT_METHOD}\"' in arch}")
+            # Expected line 1 is that the button is there FOR THE TESTER,
+            # and the module hides it on invoice_status == 'invoiced' or
+            # state != 'sale' (views/sale_order_views.xml:12). The arch
+            # check above proves the button exists; this one proves it is
+            # not hidden on THIS order — the half that MMG's auto-invoice
+            # on confirm takes away, and that the precondition step
+            # deliberately restored.
+            shown = order_totals(ctx, order_id)
+            ctx.check_true(
+                "…and Create deposit is VISIBLE on this order (the button "
+                "hides on invoice_status == 'invoiced' or state != "
+                "'sale')",
+                shown["invoice_status"] != "invoiced"
+                and shown["state"] == "sale",
+                actual_desc=f"state = {shown['state']!r}, invoice_status "
+                            f"= {shown['invoice_status']!r}")
             action = open_make_deposit_wizard(ctx, order_id)
             ctx.check("Create deposit opens the Make a Deposit wizard",
                       "order.make.deposit", action.get("res_model"))
@@ -338,7 +421,8 @@ def test_dep_005(ctx):
         created["res.partner"].append(partner_id)
         created["product.product"].append(product_id)
         created["sale.order"].append(order_id)
-        _require_confirmed_uninvoiced(ctx, order_id, order_total)
+        _require_confirmed_uninvoiced(ctx, order_id, order_total,
+                                      company)
 
     try:
         with ctx.step("Steps 1-5 / Expected line 1: 25 per cent of 8,000.00 "
@@ -456,7 +540,8 @@ def test_dep_016(ctx):
         created["res.partner"].append(partner_id)
         created["product.product"].append(product_id)
         created["sale.order"].append(order_id)
-        _require_confirmed_uninvoiced(ctx, order_id, order_total)
+        _require_confirmed_uninvoiced(ctx, order_id, order_total,
+                                      company)
 
     try:
         running = 0.0

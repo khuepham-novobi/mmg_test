@@ -52,6 +52,15 @@ fixture below:
    field*. Every workbook expectation of the shape "the field fills itself
    in from the contact" is therefore asserted for real, against the same
    call the browser makes — not simulated.
+   It is called IDS FIRST. ``onchange`` is not decorated ``@api.model``,
+   so ``call_kw`` consumes ``args[0]`` as the record ids —
+   ``ids, args = args[0], args[1:]`` (``odoo/service/model.py:86``) —
+   before the method sees its own arguments. Both helpers therefore send
+   ``[[], values, field_names, fields_spec]``, the empty id list standing
+   for the record the form has not saved yet. Sending only the three
+   documented arguments shifted every one of them along and raised
+   ``Base.onchange() missing 1 required positional argument:
+   'fields_spec'``.
 
 Safety properties this suite keeps
 ----------------------------------
@@ -82,6 +91,19 @@ WORKFLOW_NAME = "Customer & Vendor Deposits"
 MODULE = "account_partner_deposit"
 MODULE_SALE = "sale_partner_deposit"
 MARK = "FG06"
+
+# MMG auto-invoice. ``mmg_sale_auto_create_invoice`` overrides
+# ``sale.order.action_confirm`` to call ``_create_invoices()`` on every
+# order whose company carries this Boolean (``models/sale_order.py``; the
+# field is declared in ``models/res_company.py``). The flag is ON for the
+# acting company on the MMG v19 database, so confirming an order raises
+# its invoice immediately and ``invoice_status`` reads ``'invoiced'``
+# straight away. That is an MMG FEATURE the FG-06 workbook does not
+# describe — not a defect — so :func:`acting_company` reports the flag and
+# the cases whose workbook precondition says "confirmed, uninvoiced"
+# branch on it instead of reporting the feature as a product failure.
+MODULE_AUTO_INVOICE = "mmg_sale_auto_create_invoice"
+AUTO_INVOICE_FIELD = "auto_create_invoice_after_confirming_so"
 
 WORKBOOK = "MMG_v19_Client_Manual_Testing_Guideline_FG05-FG14_v1.0.xlsx"
 SHEET = "Testing Guideline"
@@ -315,12 +337,19 @@ def acting_company(ctx) -> dict:
     company the user may enter and an unscoped search would reach a sibling
     company's records — which for a company-dependent field would silently
     read a different value.
+
+    ``auto_invoice_on_confirm`` reports :data:`AUTO_INVOICE_FIELD` — whether
+    confirming a sales order auto-creates its invoice on this company. It
+    is read through :func:`fields_present` like the deposit journals, so a
+    database without ``mmg_sale_auto_create_invoice`` reports ``False``
+    rather than failing the read.
     """
     rpc = ctx.adapter.rpc
     user = rpc.call("res.users", "read", [rpc.uid], fields=["company_id"])[0]
     company_id = m2o_id(user["company_id"])
     wanted = ["name", "currency_id", "chart_template",
-              "customer_deposit_journal_id", "vendor_deposit_journal_id"]
+              "customer_deposit_journal_id", "vendor_deposit_journal_id",
+              AUTO_INVOICE_FIELD]
     readable = [f for f in wanted
                 if f in fields_present(rpc, "res.company", wanted)]
     row = rpc.read("res.company", [company_id], readable)[0]
@@ -342,6 +371,11 @@ def acting_company(ctx) -> dict:
             "customer_deposit_journal_id"
             in fields_present(rpc, "res.company",
                               ["customer_deposit_journal_id"])),
+        # False when mmg_sale_auto_create_invoice is not installed: the
+        # field is then absent from `readable` and never read, which is
+        # exactly the stock-Odoo branch the deposit cases want.
+        "auto_invoice_field_present": AUTO_INVOICE_FIELD in readable,
+        "auto_invoice_on_confirm": bool(row.get(AUTO_INVOICE_FIELD)),
     }
 
 
@@ -718,19 +752,60 @@ def ensure_deposit_account(ctx, side: str, company_id: int,
 
 def deposit_accounts_for_test(ctx, side: str, company_id: int,
                               wanted: int = 1) -> list[dict]:
-    """``wanted`` distinct eligible deposit accounts, preferring real ones."""
-    accounts = eligible_deposit_accounts(ctx, side, company_id,
-                                         limit=max(wanted, 4))
-    for row in accounts[:wanted]:
+    """``wanted`` eligible deposit accounts, DISTINCT BY ID, real ones first.
+
+    Distinct by id is the whole point of this helper, and the earlier
+    build could not guarantee it. :func:`ensure_deposit_account` is
+    find-or-create *by name*, and :func:`eligible_deposit_accounts`
+    already returns any FG06 fixture account an earlier run left behind —
+    ``sweep_fg06`` cannot remove one that a posted deposit points at.
+    Labelling the top-ups from a counter that restarted at ``A`` on every
+    call therefore re-found the account the seed already held and
+    appended it a second time, so the caller was handed the SAME account
+    twice. TC-DEP-003 recorded exactly that:
+    ``A = 979901 FG06 Customer Deposit Account A,
+    B = 979901 FG06 Customer Deposit Account A``.
+
+    Each top-up label is now chosen against the ids already collected and
+    every append is de-duplicated, so
+    ``len({a["id"] for a in result}) == wanted`` holds for every value
+    this function returns.
+    """
+    result: list[dict] = []
+    seen: set[int] = set()
+    for row in eligible_deposit_accounts(ctx, side, company_id,
+                                         limit=max(wanted, 4)):
+        if row["id"] in seen:
+            continue
+        seen.add(row["id"])
+        result.append(row)
         ctx.log(f"existing {side}-deposit account #{row['id']} "
                 f"{row['code']} {row['name']!r}")
-    index = 0
-    while len(accounts) < wanted:
-        index += 1
-        accounts.append(ensure_deposit_account(
+        if len(result) == wanted:
+            return result
+    # Top up. ensure_deposit_account finds by name before it creates, so
+    # walk the labels until one resolves to an account this set does not
+    # already hold — otherwise the account an earlier run created under
+    # that label is simply found again and duplicated.
+    for offset in range(26):
+        if len(result) == wanted:
+            break
+        row = ensure_deposit_account(
             ctx, side, company_id,
-            f"{side.title()} Deposit Account {chr(ord('A') + index - 1)}"))
-    return accounts[:wanted]
+            f"{side.title()} Deposit Account {chr(ord('A') + offset)}")
+        if row["id"] in seen:
+            ctx.log(f"{side}-deposit account #{row['id']} {row['name']!r} "
+                    f"is already in this set — moving on to the next label "
+                    f"so the caller gets DISTINCT accounts")
+            continue
+        seen.add(row["id"])
+        result.append(row)
+    if len(result) < wanted:
+        ctx.blocked(
+            f"could not assemble {wanted} DISTINCT {side}-deposit "
+            f"accounts for company #{company_id}: only "
+            f"{[r['code'] for r in result]} after 26 fixture labels")
+    return result
 
 
 # ------------------------------------------------- form / onchange mirroring
@@ -748,17 +823,41 @@ def form_defaults(ctx, model: str, names, context: dict) -> dict:
     methods over all of them (``addons/web/models/models.py:2019-2031,
     2128``). That is precisely what the workbook means by "the pop-up opens
     with…" and by "the field fills itself in from the customer".
+
+    IDS FIRST — the wire shape ``/web/dataset/call_kw`` requires
+    -----------------------------------------------------------
+    The method is declared ``def onchange(self, values, field_names,
+    fields_spec)`` and is **not** decorated ``@api.model``
+    (``addons/web/models/models.py:1973``), so ``call_kw`` consumes the
+    first positional argument as the record IDS —
+    ``ids, args = args[0], args[1:]`` (``odoo/service/model.py:86``) — and
+    only then calls the method with what is left. Sending
+    ``[values, field_names, fields_spec]`` therefore made Odoo browse
+    ``values`` as ids and call ``onchange(recs, field_names,
+    fields_spec)``, one argument short: ``Base.onchange() missing 1
+    required positional argument: 'fields_spec'`` — which is how five
+    FG-06 cases ERRORed. The call now leads with ids like every other
+    non-``@api.model`` call in this platform
+    (``rpc.call("account.move", "action_post", [move_id])``), and the id
+    list is EMPTY because a form being opened has no record yet.
     """
-    payload = ctx.adapter.rpc.call(model, "onchange", {}, [], _spec(names),
-                                   context=context) or {}
+    payload = ctx.adapter.rpc.call(model, "onchange", [], {}, [],
+                                   _spec(names), context=context) or {}
     return payload.get("value") or {}
 
 
 def onchange_values(ctx, model: str, values: dict, changed, names,
                     context: dict | None = None) -> dict:
-    """The values a form shows after the user edits ``changed``."""
+    """The values a form shows after the user edits ``changed``.
+
+    Same ids-first wire shape as :func:`form_defaults`: ``onchange`` is
+    not ``@api.model``, so ``call_kw`` takes ``args[0]`` as the record ids
+    (``odoo/service/model.py:86``) before the method sees ``values``. The
+    leading ``[]`` is the unsaved record the form is editing; the three
+    documented arguments follow it.
+    """
     payload = ctx.adapter.rpc.call(
-        model, "onchange", values, list(changed), _spec(names),
+        model, "onchange", [], values, list(changed), _spec(names),
         context=context or {}) or {}
     return payload.get("value") or {}
 
@@ -935,6 +1034,60 @@ def invoice_from_order(ctx, order_id: int) -> int:
         return 0
     ctx.log(f"invoice(s) raised from order #{order_id}: {invoice_ids}")
     return invoice_ids[-1]
+
+
+def order_invoice_rows(ctx, order_id: int) -> list[dict]:
+    """Every invoice currently linked to one sales order, with its state."""
+    rpc = ctx.adapter.rpc
+    invoice_ids = rpc.read("sale.order", [order_id],
+                           ["invoice_ids"])[0].get("invoice_ids") or []
+    if not invoice_ids:
+        return []
+    rows = rpc.read("account.move", invoice_ids,
+                    ["name", "state", "move_type", "amount_total"])
+    return [{"id": r["id"], "name": r.get("name") or "",
+             "state": r.get("state") or "",
+             "move_type": r.get("move_type") or "",
+             "amount_total": money(r.get("amount_total"))} for r in rows]
+
+
+def drop_draft_order_invoices(ctx, order_id: int) -> tuple[list, list]:
+    """Remove the DRAFT invoices of one FG06 fixture order.
+
+    Returns ``(removed, kept)`` as row dicts. Used only to put a fixture
+    order back into the workbook's stated "confirmed, uninvoiced"
+    precondition after ``mmg_sale_auto_create_invoice`` raised an invoice
+    at confirm time (see :data:`AUTO_INVOICE_FIELD`). It restores a
+    precondition; it is never a way to make an assertion pass.
+
+    ``AUTOMATION_CONVENTIONS`` rule 3 is kept. The only moves it can reach
+    are those linked to the order handed to it, which this test's own
+    ``action_confirm`` created moments earlier, and a POSTED move is never
+    touched — it comes back in ``kept`` so the caller can decide, and the
+    callers BLOCK rather than proceed on a state the workbook does not
+    describe.
+    """
+    removed, kept = [], []
+    for row in order_invoice_rows(ctx, order_id):
+        if row["state"] != "draft":
+            kept.append(row)
+            ctx.log(f"[auto-invoice] invoice {row['name']} (#{row['id']}) "
+                    f"is {row['state']!r}, not draft — left in place")
+            continue
+        try:
+            ctx.adapter.rpc.unlink("account.move", [row["id"]])
+        except OdooRPCError as exc:
+            kept.append(row)
+            ctx.log(f"[auto-invoice] draft invoice {row['name']} "
+                    f"(#{row['id']}) could not be removed ({exc})")
+        else:
+            removed.append(row)
+            ctx.log(f"[auto-invoice] removed the draft invoice "
+                    f"{row['name']} (#{row['id']}, "
+                    f"{row['amount_total']:.2f}) that action_confirm "
+                    f"auto-created, restoring the workbook's uninvoiced "
+                    f"precondition on order #{order_id}")
+    return removed, kept
 
 
 def make_deposit(ctx, partner_id: int, amount: float, *, account_id: int,

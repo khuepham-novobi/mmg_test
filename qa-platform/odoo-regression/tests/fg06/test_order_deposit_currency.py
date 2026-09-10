@@ -75,12 +75,14 @@ rather than re-deriving the rate and comparing to itself.
 from __future__ import annotations
 
 from framework.registry import test_case
-from tests.fg06.common import (CUSTOMER_SIDE, MODULE_SALE, OPTION_FIXED,
+from tests.fg06.common import (AUTO_INVOICE_FIELD, CUSTOMER_SIDE,
+                               MODULE_SALE, OPTION_FIXED,
                                WORKFLOW, WORKFLOW_NAME, acting_company,
                                cleanup, deposit_accounts_for_test,
                                deposit_popup_state, ensure_pricelist,
                                make_order, make_partner, make_product, money,
                                move_lines, open_make_deposit_wizard,
+                               order_invoice_rows,
                                order_totals, payment_row,
                                require_multi_currency, require_sale_deposit,
                                run_make_deposit_wizard, sweep_fg06, trace,
@@ -151,10 +153,34 @@ def test_dep_012(ctx):
             ctx.check("The order's total in that currency", ORDER_TOTAL,
                       order["amount_total"])
             ctx.check("The order is CONFIRMED", "sale", order["state"])
-            ctx.check_true(
-                "The order is NOT yet invoiced",
-                order["invoice_status"] != "invoiced",
-                actual_desc=f"invoice_status = {order['invoice_status']!r}")
+            # MMG auto-invoice: mmg_sale_auto_create_invoice overrides
+            # action_confirm to call _create_invoices() whenever the
+            # company carries auto_create_invoice_after_confirming_so
+            # (models/sale_order.py), and that flag is ON for the acting
+            # company — so a confirmed order reads
+            # invoice_status='invoiced' BY DESIGN. TC-DEP-012 is about the
+            # CURRENCY a deposit is taken in: none of its Expected Result
+            # lines read invoice_status, and action_make_a_deposit has no
+            # invoice gate of its own
+            # (sale_partner_deposit/models/sale_order.py). The workbook's
+            # "uninvoiced" precondition is therefore asserted only where
+            # it can hold, and the MMG behaviour is reported instead of
+            # being recorded as a deposit defect.
+            if company.get("auto_invoice_on_confirm"):
+                raised = [(r["name"], r["state"])
+                          for r in order_invoice_rows(ctx, order_id)]
+                ctx.log(
+                    f"the acting company has {AUTO_INVOICE_FIELD} = True, "
+                    f"so confirming this order auto-created {raised} and "
+                    f"invoice_status reads {order['invoice_status']!r}. "
+                    f"That is MMG behaviour, not a defect, and it does "
+                    f"not touch the currency this case checks.")
+            else:
+                ctx.check_true(
+                    "The order is NOT yet invoiced",
+                    order["invoice_status"] != "invoiced",
+                    actual_desc=f"invoice_status = "
+                                f"{order['invoice_status']!r}")
 
         with ctx.step("Step 2: Create deposit — the wizard picks up the "
                       "ORDER's currency, not the company's"):
