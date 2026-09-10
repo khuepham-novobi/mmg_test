@@ -100,7 +100,9 @@ from tests.fg06.common import (CUSTOMER_SIDE, DEPOSIT_ACCOUNT_FIELD,
                                WORKFLOW, WORKFLOW_NAME, account_row,
                                acting_company, cleanup,
                                company_default_deposit_account,
-                               deposit_accounts_for_test, fields_present,
+                               deposit_accounts_for_test,
+                               deposit_domain_removed_field,
+                               fields_present,
                                form_defaults, m2o_id, make_deposit,
                                make_partner, onchange_values,
                                partner_deposit_account, payment_row,
@@ -241,6 +243,28 @@ def test_dat_019(ctx):
                     actual_desc=(f"ir.default row for company "
                                  f"#{company['id']}: "
                                  f"{defaults[side].get('code') or 'ABSENT'}"))
+
+        with ctx.step("The deposit-account field's own domain is valid on "
+                      "this Odoo version"):
+            # Found by this suite crashing: every account.account lookup in
+            # FG-06 died with "Invalid field account.account.deprecated".
+            # The helpers were rewritten to the v19 name, so the crash is
+            # gone -- but the cause is a PRODUCT defect and must not vanish
+            # with it. account_partner_deposit was ported to v19 with
+            # ('deprecated', '=', False) still in the domain of all four
+            # deposit-account fields, and v19 removed that field.
+            stale = []
+            for side in SIDES:
+                broken_domain, domain = deposit_domain_removed_field(ctx, side)
+                ctx.log(f"{SIDE_LABEL[side]} domain: {domain or '(empty)'}")
+                if broken_domain:
+                    stale.append(
+                        f"res.partner.{DEPOSIT_ACCOUNT_FIELD[side]} domain "
+                        f"still filters on the removed field "
+                        f"account.account.deprecated: {domain}")
+            ctx.check(
+                "No deposit-account domain filters on a field Odoo 19 "
+                "removed (account.account.deprecated)", [], stale)
 
         with ctx.step("Workbook steps 3-4 (adapted to the whole population): "
                       "every contact-level override resolves to a usable "

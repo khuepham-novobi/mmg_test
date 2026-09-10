@@ -371,28 +371,50 @@ def account_row(ctx, account_id) -> dict:
     """
     if not account_id:
         return {}
+    # "Out of use" is `active = False` on v19. Odoo 19 REMOVED
+    # `account.account.deprecated` outright (v15 declared it at
+    # addons/account/models/account_account.py:62 and had no `active`; v19
+    # declares `active` at :42 and no `deprecated`), so reading the v15 name
+    # raises `Invalid field account.account.deprecated`. The leftover
+    # `vals.get('deprecated')` guard at v19 :1075 is dead code on a field the
+    # model no longer declares. The returned `deprecated` key is kept so
+    # callers read the same sense as before: True = the account is out of use.
     row = ctx.adapter.rpc.read(
         "account.account", [account_id],
-        ["code", "name", "account_type", "reconcile", "deprecated"])[0]
+        ["code", "name", "account_type", "reconcile", "active"])[0]
+    out_of_use = not bool(row.get("active", True))
     return {"id": account_id, "code": row.get("code") or "",
             "name": row.get("name") or "",
             "account_type": row.get("account_type") or "",
             "reconcile": bool(row.get("reconcile")),
-            "deprecated": bool(row.get("deprecated"))}
+            "active": not out_of_use,
+            "deprecated": out_of_use}
 
 
 def eligible_deposit_accounts(ctx, side: str, company_id: int,
                               limit: int = 10) -> list[dict]:
     """Accounts the deposit-account field would actually accept.
 
-    The domain is the module's own, verbatim
+    The domain is the module's own
     (``account_partner_deposit/models/res_partner.py:10-14`` for the customer
     side, ``:20-24`` for the vendor side), plus the company scope: v19 gives
     ``account.account`` a Many2many ``company_ids``
     (``addons/account/models/account_account.py:97``), not a Many2one.
+
+    ONE deliberate difference from the module: its ``('deprecated', '=',
+    False)`` term is **dropped**, not translated. v19 removed
+    ``account.account.deprecated`` entirely and archives accounts with the
+    standard ``active`` flag, which ``active_test`` already excludes from
+    every search — so dropping the term is equivalent, and keeping it raises
+    ``Invalid field account.account.deprecated``. This is the same rewrite
+    the migration applied in ``multichannel_order/models/
+    payment_method_mapping.py:33``, which documents the rule.
+
+    That the module still carries the removed term is a PRODUCT defect, not a
+    test concern; :func:`deposit_domain_removed_field` reports it so fixing
+    this helper does not hide it.
     """
     domain = [("account_type", "=", DEPOSIT_ACCOUNT_TYPE[side]),
-              ("deprecated", "=", False),
               ("reconcile", "=", True),
               ("company_ids", "in", [company_id])]
     rows = ctx.adapter.rpc.search_read(
@@ -400,6 +422,35 @@ def eligible_deposit_accounts(ctx, side: str, company_id: int,
         order="code", limit=limit)
     return [{"id": r["id"], "code": r.get("code") or "",
              "name": r.get("name") or ""} for r in rows]
+
+
+def deposit_domain_removed_field(ctx, side: str) -> tuple[bool, str]:
+    """Does the deposit-account field's own domain name a field v19 removed?
+
+    ``account_partner_deposit`` was ported to v19 with
+    ``('deprecated', '=', False)`` left in the domain of all four
+    deposit-account fields (``models/res_partner.py:13,23`` and
+    ``models/account_payment.py:17,27``). ``account.account.deprecated`` does
+    not exist in Odoo 19, and the migration's own note in
+    ``multichannel_order/models/payment_method_mapping.py:33`` spells out the
+    consequence: *"Leaving it in fails view validation outright — Unknown
+    field 'account.account.deprecated' in domain"*. The same note shows the
+    term was correctly dropped there, so this is a missed occurrence rather
+    than a decision.
+
+    User-visible effect: opening the Deposit Account dropdown on a contact
+    (or a payment) evaluates that domain against a field the model no longer
+    declares.
+
+    Read from the live registry via ``fields_get`` rather than from source,
+    so the verdict reflects what is actually installed. Returns
+    ``(is_broken, domain_text)``.
+    """
+    field_name = DEPOSIT_ACCOUNT_FIELD[side]
+    info = ctx.adapter.rpc.call("res.partner", "fields_get", [field_name],
+                                attributes=["domain"])
+    domain = str((info.get(field_name) or {}).get("domain") or "")
+    return ("deprecated" in domain), domain
 
 
 def company_default_deposit_account(ctx, side: str, company_id: int) -> dict:
