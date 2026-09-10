@@ -157,6 +157,38 @@ those rows assume, so a document with a section or a collapsed line prints a
 row one column too wide — the misalignment step 8 asks about. The cell
 arithmetic below measures it instead of trusting it.
 
+Verdict on Expected Result line 1 — a PRODUCT defect, left failing on purpose
+-----------------------------------------------------------------------------
+The obvious objection to the authority-count assertion is that it might be
+aimed at the wrong artefact: that the workbook's "by authority" is about the
+ON-SCREEN tax lines (TC-TAX-002 territory) and the PRINTED block was never
+claimed to break down per jurisdiction. Both workbook rows were re-read to
+settle it, and both say the printed document:
+
+* Client manual guideline, sheet ``Testing Guideline`` row 34.0 —
+  *Expected Result* line 1 is "The totals block lists the tax by authority,
+  matching what TC-TAX-002 found in the journal entry"; the *Notes* column
+  says "the breakdown you are looking for is in the TOTALS block, not on the
+  lines"; and *If It Fails* names the defect outright: "If the PDF shows one
+  combined tax row where the journal entry has several, that is the defect."
+* ``MMG_v19_Test_Cases_Grouped_by_Feature_v3.0.xlsx`` / ``Automation Export``
+  row 141 (TC-INV-003) — step 4 is "Assert each jurisdiction tax name (state,
+  county, city) appears as its own row in the tax-summary block of the
+  rendered document, with its own amount", and its *Expected Result* is "The
+  printed tax summary lists each Avalara jurisdiction's tax as a separate row
+  (state, county, city), never a single rolled-up tax amount."
+
+So one PRINTED row per authority is exactly what the workbook requires, the
+assertion is aimed at the right artefact, and its failure against the live
+Avalara sandbox is a real defect in the v19 MMG AvaTax port — not a test
+defect and not a wrongly-aimed check. It is therefore left FAILING. What was
+changed is only the failure's legibility: the assertion's message now carries
+the invoice, the authorities the entry recorded, the printed row each one
+collapsed into and the mechanism (:data:`COLLAPSE_MECHANISM`), because
+``AssertionFailed`` renders as "<name>: expected <e>, got <a>"
+(``framework/context.py:24-27``) and "expected 2, got 1" is not something a
+developer can act on. The compared values are untouched.
+
 Documented adaptation — what a human still has to look at
 ----------------------------------------------------------
 The platform can prove the *structure* of the printed document (how many tax
@@ -256,6 +288,56 @@ NO_MULTI_AUTHORITY_INVOICE = (
     "case. If FG-05 TC-TAX-002 has passed and this still blocks, the tax "
     "lines were collapsed on posting, which is itself the defect this case "
     "exists to find — report it against TC-TAX-002"
+)
+
+# The mechanism behind a printed-row-per-authority failure, written out once
+# and pasted into BOTH the finding and the failing assertion's own message.
+# Expected Result line 1 fails when the ledger holds more authorities than the
+# document prints rows, and the whole cost of triaging that is knowing which
+# object has to change; a developer who reads only the failure line must not
+# have to re-derive this from the log or from the Odoo source.
+#
+# Every citation below was read from D:/Projects/odoo-19.0 and
+# D:/Projects/mmg/psus-medicine-man-gallery at the exact line quoted.
+COLLAPSE_MECHANISM = (
+    "MECHANISM — group vs tax. One printed row is one account.tax.group, NOT "
+    "one account.tax: _get_tax_totals_summary aggregates the base lines "
+    "through tax_group_grouping_function, which returns "
+    "tax_data['tax'].tax_group_id (addons/account/models/account_tax.py:"
+    "2826-2827), publishes one tax_groups[] entry per group carrying "
+    "'group_name': tax_group.name plus the 'involved_tax_ids' of every tax "
+    "aggregated into it (:2841-2845, 2880-2889), and the template emits one "
+    "<tr class=\"o_taxes\"> per entry printing that group name "
+    "(addons/account/views/report_invoice.xml:548-552). The ledger's unit is "
+    "the TAX — account.move.line.tax_group_id is "
+    "related='tax_line_id.tax_group_id', store=True "
+    "(addons/account/models/account_move_line.py:214-217) — so authorities "
+    "sharing one account.tax.group are printed as ONE row and the customer's "
+    "copy loses a breakdown the journal entry holds. WHY THEY SHARE A GROUP: "
+    "the v19 port rewrites the TAX name only — "
+    "mmg_account_avatax_enhancement._extract_tax_values_from_avatax_detail "
+    "sets tax_values['name'] = '<taxName> [<jurisCode>] <rate>' and returns "
+    "tax_group_values exactly as super() built it, saying so in as many words "
+    "('Only the name is rewritten here' — psus-medicine-man-gallery/"
+    "mmg_account_avatax_enhancement/models/account_external_tax_mixin.py:82, "
+    "96-97). Odoo 19's own account_avatax names the group "
+    "tax_detail['taxName'].removesuffix(' TAX'), with no jurisdiction in it "
+    "(enterprise-19.0/account_avatax/models/account_external_tax_mixin.py:"
+    "166, 179), and _process_external_taxes writes tax_group_id ONLY on the "
+    "taxes it has to CREATE — a tax it matches by name and reuses keeps "
+    "whatever group it already carried (enterprise-19.0/account_external_tax/"
+    "models/account_external_tax_mixin.py:136-147 searches and reuses, "
+    ":148-153 is the only place tax_group_id is written). Keeping the v15 "
+    "tax name is exactly what makes v15's migrated taxes match and be reused, "
+    "so each reused jurisdiction tax drags its migrated tax group along — and "
+    "v15 created those taxes with no tax_group_id at all "
+    "(psus-medicine-man-gallery 53f7985, mmg_account_avatax_enhancement/"
+    "models/account_avatax.py:42-54), so they all took the database default "
+    "group. WHERE TO FIX: give each Avalara jurisdiction its own "
+    "account.tax.group. That is a configuration/port decision about tax "
+    "groups, NOT a report-template change — the template is printing the "
+    "ledger's own grouping faithfully, which is what the tax-GROUP assertion "
+    "immediately above this one proves when it passes."
 )
 
 
@@ -716,35 +798,98 @@ def test_inv_003(ctx):
                                              in group["involved"]),
                                     code.group(1) if code else ""])
 
-            if len(groups) == 1 and len(by_tax) > 1:
+            # THE COLLAPSE MAP — built once here and used by BOTH the finding
+            # below and the workbook assertion's own failure message, so that
+            # the one line a triager reads first already names the invoice,
+            # the authorities the entry recorded and the printed row each one
+            # collapsed into. Which authorities stand behind a printed row is
+            # taken from that row's own involved_tax_ids
+            # (account_tax.py:2841-2845, 2882) — the report's answer, not the
+            # test's — and falls back to the journal entry's own
+            # account.move.line.tax_group_id (related to tax_line_id's group,
+            # account_move_line.py:214-217) only when tax_totals published no
+            # such key.
+            printed_group_ids = {group["id"] for group in groups}
+            collapsed_rows = []
+            for group in groups:
+                behind = [int(tax_id)
+                          for tax_id in (group.get("involved") or [])
+                          if tax_id]
+                source = "involved_tax_ids"
+                if not behind:
+                    behind = sorted(
+                        tax_id for tax_id, entry in by_tax.items()
+                        if tax_id and entry["group_id"] == group["id"])
+                    source = "journal entry tax_group_id"
+                if len(behind) < 2:
+                    continue
+                described = []
+                for tax_id in behind:
+                    recorded_tax = by_tax.get(tax_id) or {}
+                    tax_label = (recorded_tax.get("tax_name")
+                                 or recorded_tax.get("name")
+                                 or f"account.tax #{tax_id}")
+                    described.append(
+                        f"{tax_label!r} (account.tax #{tax_id}) "
+                        f"{money(recorded_tax.get('amount')):.2f}")
+                named = "; ".join(described)
+                collapsed_rows.append(
+                    f"printed row {group['name']!r} (account.tax.group "
+                    f"#{group['id']}) = {group['amount']:.2f} stands for "
+                    f"{len(behind)} authorities [{source}]: {named}")
+            # An authority the entry recorded whose group the document never
+            # printed at all is a different fault (template, not grouping) and
+            # is named separately so the two are never confused.
+            unprinted = [
+                f"{entry['tax_name']!r} (account.tax #{tax_id}) "
+                f"{entry['amount']:.2f} under tax group {entry['group']!r} "
+                f"#{entry['group_id']}"
+                for tax_id, entry in sorted(by_tax.items(),
+                                            key=lambda kv: -kv[1]["amount"])
+                if entry["group_id"] not in printed_group_ids]
+
+            # Assembled only when the counts actually disagree: on a healthy
+            # document the assertion below keeps its short, readable name.
+            authority_diagnosis = ""
+            if len(groups) != len(by_tax):
+                authority_diagnosis = (
+                    f" || DIAGNOSIS — invoice {detail.get('name')!r} "
+                    f"(account.move #{move_id}, "
+                    f"{m2o_name(detail.get('partner_id'))!r}, dated "
+                    f"{detail.get('invoice_date')}): the journal entry "
+                    f"recorded {len(by_tax)} authorit(ies) under "
+                    f"{len(by_group)} tax group(s), and the printed totals "
+                    f"block carries {len(groups)} tax row(s). "
+                    + (f"COLLAPSED: {' | '.join(collapsed_rows)}. "
+                       if collapsed_rows else "")
+                    + (f"RECORDED BUT NOT PRINTED AT ALL: "
+                       f"{' | '.join(unprinted)}. " if unprinted else "")
+                    + f"Full per-row evidence is in {TOTALS_CSV}"
+                    # Only name the files that were actually captured: the
+                    # PDF exists only when wkhtmltopdf was usable, and the
+                    # evidence block below attaches exactly these.
+                    + (f", the rendered document as {HTML_ARTIFACT}"
+                       if printed["html"] else "")
+                    + (f", and the printed PDF the workbook's If It Fails "
+                       f"column asks for as {PDF_ARTIFACT}"
+                       if printed["pdf_bytes"] else "")
+                    + ". " + COLLAPSE_MECHANISM)
+
+            if len(groups) < len(by_tax):
                 finding(ctx,
-                        f"the totals block collapses {len(by_tax)} journal "
-                        f"entry tax lines into ONE printed row "
-                        f"{groups[0]['name']!r}. The template prints "
-                        f"tax_group['group_name'], which is "
-                        f"account.tax.group.name "
-                        f"(addons/account/models/account_tax.py:2889 ; "
-                        f"addons/account/views/report_invoice.xml:551), so "
-                        f"every Avalara jurisdiction has been filed under a "
-                        f"single account.tax.group. This is the workbook's "
-                        f"named defect: 'If the PDF shows one combined tax "
-                        f"row where the journal entry has several, that is "
-                        f"the defect'. Where to look first: "
-                        f"_process_external_taxes sets tax_group_id only on "
-                        f"the taxes it CREATES — a tax it matches by name and "
-                        f"reuses keeps the group it already had "
-                        f"(enterprise-19.0/account_external_tax/models/"
-                        f"account_external_tax_mixin.py:127-156) — and "
-                        f"keeping the v15 tax name is precisely what makes "
-                        f"v15's migrated taxes match, so each reused "
-                        f"jurisdiction tax drags its migrated tax group along "
-                        f"with it — and v15 created those taxes with no "
-                        f"tax_group_id at all (psus-medicine-man-gallery "
-                        f"53f7985, mmg_account_avatax_enhancement/models/"
-                        f"account_avatax.py:42-54), so they all took the "
-                        f"database default group. Check the tax_group_id of "
-                        f"the account.tax records listed in "
-                        f"{TOTALS_CSV}")
+                        f"the printed totals block carries {len(groups)} tax "
+                        f"row(s) where the journal entry of "
+                        f"{detail.get('name')!r} recorded {len(by_tax)} "
+                        f"distinct tax authorit(ies), so the customer's copy "
+                        f"does not break the tax down by authority. This is "
+                        f"the workbook's named defect, in its own words: 'If "
+                        f"the PDF shows one combined tax row where the "
+                        f"journal entry has several, that is the defect'"
+                        + (f". {' | '.join(collapsed_rows)}"
+                           if collapsed_rows else "")
+                        + (f". Recorded but not printed at all: "
+                           f"{' | '.join(unprinted)}" if unprinted else "")
+                        + f". {COLLAPSE_MECHANISM}")
 
             # The taxes-vs-groups gap, described in full BEFORE either
             # assertion so that a failure is triaged against the right object.
@@ -760,8 +905,9 @@ def test_inv_003(ctx):
                         f"the report behaves: the document prints "
                         f"account.tax.group.name (addons/account/models/"
                         f"account_tax.py:2889 ; addons/account/views/"
-                        f"report_invoice.xml:551), so every tax filed under "
-                        f"one group is printed as ONE line. If the gallery "
+                        f"report_invoice.xml:548-552), so every tax filed "
+                        f"under one group is printed as ONE line. If the "
+                        f"gallery "
                         f"needs a row per Avalara jurisdiction on the "
                         f"customer's copy, each jurisdiction needs its own "
                         f"account.tax.group — that is a configuration "
@@ -829,13 +975,22 @@ def test_inv_003(ctx):
             # (enterprise-19.0/account_avatax/models/
             # account_external_tax_mixin.py:166, 179) for every tax it has to
             # create rather than reuse.
+            #
+            # The comparison itself is UNCHANGED and unweakened — distinct
+            # authorities against printed rows. Only the assertion's NAME
+            # grows, and only when the two counts already disagree, so a
+            # healthy run keeps the short label while a failing run carries
+            # the invoice, the collapse map and the mechanism in the very
+            # first line a triager reads: AssertionFailed renders as
+            # "<name>: expected <e>, got <a>" (framework/context.py:24-27),
+            # and "expected 2, got 1" on its own is not actionable.
             ctx.check(
                 "The totals block lists the tax BY AUTHORITY: the printed "
                 "document carries one tax row for each authority the journal "
                 "entry recorded, never one combined row (workbook Expected "
                 "Result line 1; printed tax_totals subtotals[].tax_groups[] "
                 "vs distinct account.move.line.tax_line_id where "
-                "display_type='tax')",
+                "display_type='tax')" + authority_diagnosis,
                 len(by_tax), len(groups))
 
         with ctx.step("Step 6 / Expected line 2: the tax names shown carry "
@@ -844,8 +999,8 @@ def test_inv_003(ctx):
             # WHICH OBJECT CARRIES THE AUTHORITY CODE, and therefore what this
             # is asserted against. The printed row's LABEL is
             # account.tax.group.name (addons/account/models/account_tax.py:
-            # 2889 ; addons/account/views/report_invoice.xml:551), and nothing
-            # in this stack ever puts a jurisdiction code into a tax GROUP
+            # 2889 ; addons/account/views/report_invoice.xml:548-552), and
+            # nothing in this stack ever puts a jurisdiction code into a GROUP
             # name: Odoo 19's account_avatax names the group
             # tax_detail['taxName'].removesuffix(' TAX')
             # (enterprise-19.0/account_avatax/models/
@@ -890,9 +1045,10 @@ def test_inv_003(ctx):
                         f"{labels!r} — because the template prints "
                         f"tax_group['group_name'] "
                         f"(addons/account/models/account_tax.py:2889 ; "
-                        f"addons/account/views/report_invoice.xml:551), and "
-                        f"no group name on this document carries a bracketed "
-                        f"authority code. The jurisdiction lives on the "
+                        f"addons/account/views/report_invoice.xml:548-552), "
+                        f"and no group name on this document carries a "
+                        f"bracketed authority code. The jurisdiction lives "
+                        f"on the "
                         f"account.tax records asserted below, which is where "
                         f"mmg_account_avatax_enhancement writes it and where "
                         f"FG-05 TC-TAX-002 reads it on screen. For the "

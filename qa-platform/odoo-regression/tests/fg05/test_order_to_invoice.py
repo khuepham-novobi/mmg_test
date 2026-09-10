@@ -114,6 +114,25 @@ Documented adaptations (business assertions unchanged)
    COMMITTED") report a false P0. Posted ids are kept out of ``created``;
    ``sweep_fg05`` already scopes itself to draft/cancelled moves, and every
    other fixture is still cleaned up in ``finally``.
+5. **TC-TAX-010's warehouse shipFrom is gated, not asserted.** The case starts
+   on a quotation, and ``account_avatax_stock`` gives a sale order line a
+   *line-level* ``shipFrom`` built from that line's warehouse address
+   (``account_avatax_stock/models/sale_order.py:11`` ->
+   ``…/account_external_tax_mixin.py:32-35``). A warehouse with no address does
+   not fall back to the document-level address: the empty recordset satisfies
+   the ``!= company.partner_id`` test, and
+   ``account_avatax/models/account_external_tax_mixin.py:108-121`` then emits
+   ``'country': False`` because its ``all(partner._fields[f] …)`` guard tests
+   field descriptors instead of values. Avalara rejects the whole
+   ``CreateTransaction`` and the order never receives the tax figure steps 5-6
+   compare against, so :func:`~tests.fg05.common.require_warehouse_shipfrom`
+   reports BLOCKED naming the warehouse, what is missing and the remedy,
+   instead of the case ERRORing on Avalara's text. TC-TAX-011 does **not**
+   call it: it builds stand-alone customer invoices, whose lines have no
+   delivery moves, so ``account_avatax_stock/models/account_move.py:10-15``
+   leaves their warehouse ``None`` and no line-level address is sent — which
+   is why the invoice cases in this suite compute tax correctly today and must
+   keep doing so.
 """
 from __future__ import annotations
 
@@ -124,7 +143,8 @@ from tests.fg05.common import (ADDRESS_MISSOULA_MT, ADDRESS_PHOENIX_AZ, MODULE,
                                doc_totals, make_invoice, make_partner,
                                make_product, make_quotation,
                                require_avatax_fiscal_position,
-                               require_sandbox, sweep_fg05, trace)
+                               require_sandbox, require_warehouse_shipfrom,
+                               sweep_fg05, trace)
 
 # The wizard behind the sale order's "Create Invoice" button
 # (addons/sale/views/sale_order_views.xml:272-279 opens
@@ -223,6 +243,22 @@ def test_tax_010(ctx):
                                       [(product_id, 1, 2000.00)],
                                       fiscal_position_id=fp_id)
             created["sale.order"].append(order_id)
+            # This case starts on a QUOTATION, so it carries the line-level
+            # shipFrom that account_avatax_stock builds from the line's
+            # warehouse. When that warehouse has no address, Avalara refuses
+            # the whole document ("Unknown country name or code (FALSE)") and
+            # the order never gets the tax figure steps 5-6 compare the
+            # invoice against — so the case is BLOCKED with the warehouse
+            # named, not left to ERROR on Avalara's text. See
+            # tests/fg05/common.py::require_warehouse_shipfrom and
+            # ODOO_SHIPFROM_DEFECT. The invoice half of this case inherits the
+            # same warehouse through its delivery moves
+            # (account_avatax_stock/models/account_move.py:10-15), so the gate
+            # covers both halves.
+            require_warehouse_shipfrom(
+                ctx, order_id,
+                "workbook steps 1-2 — computing the quotation's tax, which is "
+                "the figure steps 5-6 compare the invoice against")
             compute_taxes(ctx, "sale.order", order_id)
 
         with ctx.step("Step 2 (workbook): write down the quotation's Untaxed "

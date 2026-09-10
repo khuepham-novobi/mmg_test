@@ -41,6 +41,34 @@ This test therefore reports BLOCKED (never FAILED) when either account is
 missing or the two resolve to the same account, naming TC-DAT-017 as the
 owner of that setup gap.
 
+Self-diagnosing failure — two findings are LOGGED, nothing is weakened
+----------------------------------------------------------------------
+An account that is present and distinct can still be the wrong *kind* of
+account, and that is not something this case may block on or assert around.
+Two observations are therefore written into the evidence, and the workbook's
+assertions are left exactly as they were:
+
+1. **The configured account is judged.** Both ``avatax_invoice_account_id`` and
+   ``avatax_refund_account_id`` are read with their ``account_type``, and a
+   type that cannot hold a tax charge is logged as a FINDING naming the
+   account's id, code, name and type, and the remedy (an Accountant chooses a
+   tax control account on the fiscal position's AvaTax tab). The criteria come
+   from Odoo's own source — the repartition line's field domain
+   (``addons/account/models/account_tax.py:5289``) and the tax-closing rule
+   (``account_tax.py:5310-5317``) — see
+   :func:`~tests.fg05.common.tax_account_verdict`.
+2. **Where the tax actually landed is judged separately.** The distinct
+   accounts on the posted tax journal items are reported before the assertion
+   runs, and an account in the ``income`` internal group is flagged as a P0
+   shape: sales tax booked into revenue overstates income, understates the tax
+   owed, and is dropped from the tax closing entry entirely. That can happen
+   *even with a correct fiscal position*, because ``_process_external_taxes``
+   reuses an ``account.tax`` matched by NAME and only a newly created tax
+   receives the fiscal position's accounts — see :data:`REUSED_TAX_NOTE`.
+
+Both are ``ctx.log`` lines. The verdict still comes from the workbook's four
+Expected Result assertions, and a wrong account still FAILS the case.
+
 Sign convention on the tax amount
 ---------------------------------
 ``account.move.amount_tax`` is ``direction_sign * total_tax_currency``
@@ -95,11 +123,37 @@ from __future__ import annotations
 
 from framework.registry import test_case
 from tests.fg05.common import (ADDRESS_PHOENIX_AZ, MODULE, WORKFLOW,
-                               WORKFLOW_NAME, account_code, cleanup,
-                               compute_taxes, doc_totals, make_invoice,
-                               make_partner, make_product, move_tax_lines,
+                               WORKFLOW_NAME, account_code, account_row,
+                               cleanup, compute_taxes, describe_account,
+                               doc_totals, make_invoice, make_partner,
+                               make_product, move_tax_lines,
                                require_avatax_fiscal_position, require_sandbox,
-                               sweep_fg05, trace)
+                               sweep_fg05, tax_account_verdict, trace)
+
+# Why a wrong Avatax account on the fiscal position may never reach the
+# journal item, and why the two failures are separate defects.
+# ``_process_external_taxes`` looks an ``account.tax`` up BY NAME first and
+# reuses it when it exists (enterprise account_external_tax/models/
+# account_external_tax_mixin.py:136-143); only a tax it has to CREATE gets the
+# fiscal position's Avatax accounts on its repartition lines
+# (account_avatax/models/account_external_tax_mixin.py:185-192). MMG's
+# ``_extract_tax_values_from_avatax_detail`` deliberately restores the v15 tax
+# name shape "<TAX NAME> [<jurisCode>] (<rate> %)"
+# (mmg_account_avatax_enhancement/models/account_external_tax_mixin.py:96) so
+# the taxes migrated from v15 match by name and are reused instead of being
+# duplicated — which is correct for naming, and means those taxes keep THEIR
+# OWN v15 repartition accounts. So a wrong Avatax Invoice Account and a tax
+# landing on the wrong account are two distinct findings, and both are
+# reported below.
+REUSED_TAX_NOTE = (
+    "account_external_tax/models/account_external_tax_mixin.py:136-143 reuses "
+    "an existing account.tax matched BY NAME and only a newly created tax "
+    "receives the fiscal position's Avatax accounts (account_avatax/models/"
+    "account_external_tax_mixin.py:185-192); mmg_account_avatax_enhancement "
+    "restores the v15 name shape on purpose (models/"
+    "account_external_tax_mixin.py:96) so the migrated v15 taxes match by name "
+    "and are reused WITH their own v15 repartition accounts"
+)
 
 # TC-TAX-001 test data, reproduced here because this test builds its own
 # source invoice instead of reusing TC-TAX-001's (see module docstring).
@@ -112,6 +166,43 @@ def _m2o_id(value):
     if isinstance(value, (list, tuple)):
         return value[0] if value else None
     return value or None
+
+
+def _report_posted_tax_accounts(ctx, document, account_ids, expected_label,
+                                expected_code):
+    """Say WHERE the tax actually landed, before the assertion judges it.
+
+    Logged, never asserted: the workbook's own expectation (the tax line sits
+    on the configured AvaTax account) is asserted immediately afterwards and is
+    left untouched. This only makes the failure self-diagnosing — a tax posted
+    to revenue is the shape the workbook calls a P0 elsewhere, and it is worth
+    naming even though it is not what this assertion is phrased about.
+    """
+    for account_id in sorted(a for a in account_ids if a):
+        row = account_row(ctx, account_id)
+        plausible, why = tax_account_verdict(row)
+        landed = (f"the AvaTax tax on the {document} posted to "
+                  f"{describe_account(row)}")
+        if plausible and row["code"] == expected_code:
+            ctx.log(f"{landed} — the configured {expected_label}")
+            continue
+        if plausible:
+            ctx.log(f"!!! OBSERVATION — {landed}, which is NOT the configured "
+                    f"{expected_label} (code {expected_code!r}). "
+                    f"{REUSED_TAX_NOTE}.")
+            continue
+        severity = ("P0 — tax posted to revenue"
+                    if row["internal_group"] == "income"
+                    else "tax posted to an account that cannot hold a tax "
+                         "charge")
+        ctx.log(
+            f"!!! OBSERVATION ({severity}) — {landed}, which is NOT the "
+            f"configured {expected_label} (code {expected_code!r}) and is not "
+            f"a tax account at all: {why}. This is a SECOND defect, "
+            f"independent of whatever the fiscal position holds: "
+            f"{REUSED_TAX_NOTE}. Booking sales tax into revenue overstates "
+            f"income and understates the tax owed, and the tax closing entry "
+            f"never sees it.")
 
 
 @test_case(
@@ -177,6 +268,52 @@ def test_tax_015(ctx):
                 f"Avatax Invoice Account #{invoice_account_id} code "
                 f"{invoice_code!r}, Avatax Refund Account #{refund_account_id} "
                 f"code {refund_code!r}")
+
+        # Configuration finding, NOT a gate. Both accounts land on the tax's
+        # repartition lines (account_avatax/models/
+        # account_external_tax_mixin.py:187 and :191), i.e. they are the
+        # accounts every AvaTax tax amount would be posted to. An account that
+        # cannot sanely hold a tax charge is a real defect in the target
+        # database's configuration — but it is the workbook's own expectation
+        # that decides this case's verdict, so this is LOGGED prominently and
+        # the assertions below are left exactly as they are. See
+        # common.tax_account_verdict for where the criteria come from: Odoo's
+        # own repartition-line domain and its tax-closing rule, not an opinion
+        # about charts of accounts.
+        for label, account_id, field in (
+            ("Avatax Invoice Account", invoice_account_id,
+             "avatax_invoice_account_id"),
+            ("Avatax Refund Account", refund_account_id,
+             "avatax_refund_account_id"),
+        ):
+            row = account_row(ctx, account_id)
+            plausible, why = tax_account_verdict(row)
+            if plausible:
+                ctx.log(f"{label} — {describe_account(row)}: a plausible tax "
+                        f"control account")
+                continue
+            ctx.log(
+                f"!!! FINDING — CONFIGURATION DEFECT on the target database "
+                f"(logged, not blocked; this case is left FAILING on purpose). "
+                f"The {label} on fiscal position #{fp_id} "
+                f"{fp.get('name')!r} (account.fiscal.position.{field}) is "
+                f"{describe_account(row)}. That cannot be right for booking "
+                f"tax: {why}. account_avatax writes this account onto the "
+                f"AvaTax tax's "
+                f"{'invoice' if field.endswith('invoice_account_id') else 'refund'}"
+                f" repartition line (account_avatax/models/"
+                f"account_external_tax_mixin.py:"
+                f"{187 if field.endswith('invoice_account_id') else 191}), so "
+                f"it is the account every AvaTax tax amount would be posted "
+                f"to. An ACCOUNTANT must choose proper tax accounts — a tax "
+                f"control account is a liability owed to the tax authority, "
+                f"typically 'Sales Tax Payable' with Type 'Current "
+                f"Liabilities' — on Accounting > Configuration > Fiscal "
+                f"Positions > {fp.get('name')!r} > AvaTax tab, for BOTH "
+                f"Avatax Invoice Account and Avatax Refund Account, and this "
+                f"case must then be re-run. Owner: TC-DAT-017 verifies this "
+                f"setup (its step 5), TC-TAX-015 only consumes it.")
+
         sweep_fg05(ctx)
 
     try:
@@ -231,6 +368,10 @@ def test_tax_015(ctx):
             invoice_line_codes = sorted(
                 {account_code(ctx, account_id)
                  for account_id in invoice_line_account_ids})
+            # Logged BEFORE the assertion, so the evidence survives the raise.
+            _report_posted_tax_accounts(ctx, "posted source invoice",
+                                        invoice_line_account_ids,
+                                        "Avatax Invoice Account", invoice_code)
             # Expected Result 1 — a multi-jurisdiction address (Phoenix AZ)
             # produces several tax lines, but every one of them must sit on the
             # single Avatax Invoice Account, so the distinct set is compared.
@@ -316,6 +457,9 @@ def test_tax_015(ctx):
             credit_line_codes = sorted(
                 {account_code(ctx, account_id)
                  for account_id in credit_line_account_ids})
+            _report_posted_tax_accounts(ctx, "posted credit note",
+                                        credit_line_account_ids,
+                                        "Avatax Refund Account", refund_code)
             # Expected Result 2, first half — the code match.
             ctx.check("credit note tax line account code(s) = Avatax Refund "
                       "Account", [refund_code], credit_line_codes)

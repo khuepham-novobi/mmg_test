@@ -101,6 +101,27 @@ Documented adaptations
    Arizona's state rate alone is 5.6 % and Montana levies no state sales tax,
    so the half-of margin is comfortably inside the real gap while still
    refusing to pass on a one-cent difference.
+6. **The warehouse shipFrom precondition is a GATE, not an assertion.** On
+   ``sale.order`` — and only there — Odoo 19 Enterprise sends a *line-level*
+   ``shipFrom`` built from the line's warehouse address, and it builds an
+   empty one rather than skipping it when the warehouse has no address
+   (``account_avatax_stock/models/account_external_tax_mixin.py:32-35`` plus
+   the dead ``_fields`` guard in
+   ``account_avatax/models/account_external_tax_mixin.py:108-121``; see
+   :data:`~tests.fg05.common.ODOO_SHIPFROM_DEFECT`). Avalara then rejects the
+   whole ``CreateTransaction`` with *"Unknown country name or code (FALSE)"*
+   and the quotation gets **no tax figure at all**, so every quotation
+   expectation becomes unevaluable — the case is not wrong, the document
+   simply never came back. :func:`~tests.fg05.common.
+   require_warehouse_shipfrom` is therefore called on the quotation before any
+   Compute Taxes press that the case's verdict depends on, and reports BLOCKED
+   naming the warehouse, exactly what is missing, the Inventory remedy and the
+   two Odoo defects. Nothing is weakened: no assertion changed, and the gate
+   is a precondition probe of the same kind as ``require_sandbox``. It is
+   applied only where a warehouse is genuinely involved — the invoice cases in
+   this suite never call it, because ``account_avatax_stock`` leaves an
+   invoice line's warehouse ``None`` unless its stock moves resolve to exactly
+   one shipping address (``account_avatax_stock/models/account_move.py:10-15``).
 
 Safety
 ------
@@ -127,7 +148,8 @@ from tests.fg05.common import (ADDRESS_INCOMPLETE, ADDRESS_MISSOULA_MT,
                                make_quotation,
                                require_avatax_fiscal_position,
                                require_sandbox, require_v19,
-                               server_error_message, sweep_fg05, trace)
+                               require_warehouse_shipfrom, server_error_message,
+                               sweep_fg05, trace, warehouse_shipfrom_probe)
 
 # First line of the refusal raised by
 # mmg_account_avatax_enhancement/models/account_external_tax_mixin.py
@@ -348,6 +370,18 @@ def test_tax_007(ctx):
                       opening["state"])
             ctx.check("Untaxed Amount on the saved quotation", 2000.00,
                       opening["untaxed"])
+            # Read (do not gate) the line-level shipFrom situation now, so the
+            # two Compute Taxes presses below can each decide whether pressing
+            # can produce anything meaningful. Steps 1-9 are unaffected: the
+            # address guard under test is an @api.constrains that never
+            # reaches Avalara, so a broken warehouse cannot change their
+            # verdict. See module docstring adaptation 6.
+            shipfrom = warehouse_shipfrom_probe(ctx, order_id)
+            ctx.log(f"shipFrom probe — applicable={shipfrom['applicable']} "
+                    f"ok={shipfrom['ok']} ({shipfrom['note']}); "
+                    + (" | ".join(f"#{w['id']} {w['name']!r}: {w['verdict']}"
+                                  for w in shipfrom["warehouses"])
+                       or "no warehouse on any line"))
 
         with ctx.step("Workbook steps 4 and 6: set the Delivery Address to "
                       "the incomplete contact and save"):
@@ -364,26 +398,45 @@ def test_tax_007(ctx):
         with ctx.step("Workbook steps 7-8: click Compute Taxes and read the "
                       "error pop-up in full"):
             press_note = ""
+            # Two independent reasons this fallback press may be skipped. It is
+            # deliberately NOT a ctx.blocked() either way: reaching this branch
+            # at all means the @api.constrains address guard did not fire on
+            # the save, which is the serious failure the workbook names, and it
+            # must stay a FAILED verdict rather than be masked by a
+            # precondition block. Skipping the press costs nothing: on v19
+            # _get_external_taxes never calls _check_address (it is only an
+            # @api.constrains), so the press could not raise the address error
+            # under test in any case.
+            skip_reasons = []
+            if not sandbox_ready:
+                skip_reasons.append(
+                    f"this company is not sandbox-configured (environment="
+                    f"{config['environment']!r}, api_id={config['api_id']}, "
+                    f"api_key={config['api_key']}) and the press would be a "
+                    f"live Avalara CreateTransaction")
+            if shipfrom["applicable"] and not shipfrom["ok"]:
+                skip_reasons.append(
+                    f"the warehouse this quotation ships from cannot produce a "
+                    f"shipFrom address ({shipfrom['gap']}), so the press could "
+                    f"only return Avalara's 'Unknown country name or code "
+                    f"(FALSE)'")
             if not refusal:
-                if sandbox_ready:
+                if skip_reasons:
+                    press_note = (
+                        "; Compute Taxes was NOT pressed — "
+                        + "; and ".join(skip_reasons)
+                        + ". It could not have produced the address error "
+                          "anyway: on v19 _check_address is only an "
+                          "@api.constrains and _get_external_taxes never calls "
+                          "it (account_avatax/models/"
+                          "account_external_tax_mixin.py), so a save that went "
+                          "through IS the guard failing to fire")
+                    ctx.log(press_note.lstrip("; "))
+                else:
                     refusal = _press_compute_taxes(ctx, "sale.order", order_id)
                     fired_on = ("Compute Taxes "
                                 "(button_external_tax_calculation)"
                                 if refusal else "")
-                else:
-                    press_note = (
-                        "; Compute Taxes was NOT pressed — this company is "
-                        f"not sandbox-configured (environment="
-                        f"{config['environment']!r}, api_id="
-                        f"{config['api_id']}, api_key={config['api_key']}) "
-                        "and the press would be a live Avalara "
-                        "CreateTransaction. It could not have produced the "
-                        "address error anyway: on v19 _check_address is only "
-                        "an @api.constrains and _get_external_taxes never "
-                        "calls it (account_avatax/models/"
-                        "account_external_tax_mixin.py), so a save that went "
-                        "through IS the guard failing to fire")
-                    ctx.log(press_note.lstrip("; "))
             ctx.log(f"address guard fired on: "
                     f"{fired_on or 'NOTHING — nothing was refused'}")
             ctx.log("note: a child contact's display_name embeds its parent's "
@@ -454,6 +507,20 @@ def test_tax_007(ctx):
                       "Expected Result branches here on whether sandbox "
                       "credentials exist, and so does this step"):
             if sandbox_ready:
+                # Before pressing: the workbook's step-10 expectation is
+                # "Compute Taxes now succeeds", and on this database it cannot
+                # — not because the address guard failed, but because Odoo
+                # builds an empty line-level shipFrom from a warehouse with no
+                # address and Avalara refuses the whole document. That is a
+                # precondition of the press, not a verdict on the guard, so it
+                # BLOCKS with the warehouse named rather than FAILING on
+                # Avalara's cryptic text. Steps 1-9 above have already been
+                # asserted in full and stay in the evidence.
+                require_warehouse_shipfrom(
+                    ctx, order_id,
+                    "workbook step 10 — pressing Compute Taxes on the "
+                    "quotation once the delivery contact's address is "
+                    "complete, and reading the recomputed totals")
                 # Sandbox branch of the workbook: "Compute Taxes now
                 # succeeds". Anything else is a failure, INCLUDING a
                 # non-address error — e.g. the UserError "The Avalara Tax Code
@@ -577,6 +644,15 @@ def test_tax_008(ctx):
             ctx.check("no tax on the quotation before Compute Taxes", 0.00,
                       before["tax"])
 
+        with ctx.step("Precondition of workbook step 5: the warehouse this "
+                      "quotation ships from must be able to produce a "
+                      "shipFrom address for Avalara"):
+            require_warehouse_shipfrom(
+                ctx, order_id,
+                "workbook step 5 — Compute Taxes on the quotation, and the "
+                "non-zero Taxes figure, Total and Avalara Code steps 6-7 read "
+                "from it")
+
         with ctx.step("Workbook step 5: click Compute Taxes below the order "
                       "lines"):
             error = _press_compute_taxes(ctx, "sale.order", order_id)
@@ -681,6 +757,15 @@ def test_tax_009(ctx):
                                        fiscal_position_id=fp_id,
                                        shipping_partner_id=delivery_a)
             created["sale.order"].append(order_id)
+
+        with ctx.step("Precondition of workbook steps 2 and 5: the warehouse "
+                      "this quotation ships from must be able to produce a "
+                      "shipFrom address for Avalara"):
+            require_warehouse_shipfrom(
+                ctx, order_id,
+                "workbook steps 2 and 5 — Compute Taxes against the Arizona "
+                "delivery and then against the Montana one, so the two "
+                "figures can be compared")
 
         with ctx.step("Workbook step 2: Delivery Address = A (Phoenix AZ), "
                       "save, then click Compute Taxes"):

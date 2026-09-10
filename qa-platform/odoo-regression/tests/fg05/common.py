@@ -52,6 +52,31 @@ Safety properties this suite keeps
   :func:`fg05_product_category`. The category that supplies it is created
   from the codes already on the target database, is ``FG05``-marked, and is
   swept with the rest of the fixtures.
+
+Gates that name a defect instead of relaying a cryptic failure
+--------------------------------------------------------------
+A case whose document never comes back from Avalara cannot evaluate its
+expectation, and reporting Avalara's own wording for that is close to useless
+to the person reading the report. Two probes here turn such a run into a
+statement about the target system:
+
+* :func:`require_warehouse_shipfrom` — QUOTATIONS only. Odoo 19 Enterprise
+  builds a *line-level* ``shipFrom`` from a sale order line's warehouse
+  address, and builds an EMPTY one instead of skipping it when the warehouse
+  has no address, so Avalara refuses the whole ``CreateTransaction`` with
+  "Unknown country name or code (FALSE)". The gate reports BLOCKED naming
+  ``stock.warehouse``, the warehouse, exactly which of country / state / zip is
+  missing, the Inventory remedy, and the two Odoo defects
+  (:data:`ODOO_SHIPFROM_DEFECT`). Invoice cases never call it, and are
+  unaffected.
+* :func:`tax_account_verdict` — reads whether an account is a plausible place
+  to POST a tax amount, from Odoo's own repartition-line domain and its
+  tax-closing rule rather than from an opinion about charts of accounts. Its
+  callers LOG the verdict; none of them blocks or asserts on it, so a workbook
+  expectation about tax accounts still decides its own case.
+
+Neither probe changes an assertion, and neither can turn a real defect green:
+the first refuses to give a verdict at all, and the second only writes evidence.
 """
 from __future__ import annotations
 
@@ -427,6 +452,218 @@ def require_avatax_fiscal_position(ctx) -> tuple[int, dict]:
     return found[0]["id"], found[0]
 
 
+# ------------------------------------------------- warehouse shipFrom gate
+# Odoo 19 Enterprise sends a LINE-LEVEL ``shipFrom`` address for a sale order
+# line whose warehouse has an address of its own, and gets that address wrong
+# in two independent places. A warehouse with NO address at all therefore does
+# not fall back to the document-level shipFrom: it sends ``country: False`` and
+# Avalara rejects the whole CreateTransaction with "Unknown country name or
+# code (FALSE)". No FG-05 QUOTATION expectation can be evaluated on such a
+# database — not because the expectation is wrong, but because the document
+# never gets a tax figure of any kind.
+AVATAX_STOCK_MODULE = "account_avatax_stock"
+
+ODOO_SHIPFROM_DEFECT = (
+    "WHY THIS IS AN ODOO DEFECT AND NOT A TEST FAULT — two stock Odoo 19 "
+    "Enterprise bugs combine here. (1) account_avatax_stock/models/"
+    "account_external_tax_mixin.py:32-35 adds the line-level addresses "
+    "whenever `warehouse and warehouse.partner_id != "
+    "line_data['base_line']['record'].company_id.partner_id`; an EMPTY "
+    "res.partner recordset is not equal to the company's partner, so a "
+    "warehouse with no Address TAKES that branch instead of being skipped, and "
+    "line 22 then calls `self._get_avatax_address(warehouse_id.partner_id)` on "
+    "that empty recordset. (2) account_avatax/models/"
+    "account_external_tax_mixin.py:108-121 `_get_avatax_address` guards its "
+    "real branch with `all(partner._fields[field] for field in ['zip', "
+    "'state_id', 'country_id'])` — `partner._fields[f]` is the FIELD "
+    "DESCRIPTOR, which is always truthy, so the test can never be False, the "
+    "latitude/longitude fallback on lines 118-120 is unreachable dead code, "
+    "and the call goes out with 'country': partner.country_id.code = False for "
+    "an empty or incomplete partner. mmg_account_avatax_enhancement cannot "
+    "catch it either: its _check_partner_shipping_address guard validates "
+    "partner_shipping_id only (mmg_account_avatax_enhancement/models/"
+    "account_external_tax_mixin.py:44-71) and never looks at the warehouse. "
+    "Report this to Odoo Enterprise; the database-side remedy above is what "
+    "unblocks FG-05 in the meantime."
+)
+
+SHIPFROM_REMEDY = (
+    "REMEDY (an Inventory administrator, not a code change): open Inventory > "
+    "Configuration > Warehouses > the warehouse named below, set its Address "
+    "(stock.warehouse.partner_id, addons/stock/models/stock_warehouse.py:41 — "
+    "the field is NOT required, which is how it came to be empty) to a partner "
+    "whose Country, State and Zip are all filled in, and re-run. Pointing the "
+    "warehouse at the company's own partner also works: that is the one case "
+    "account_avatax_stock treats as 'nothing to add'."
+)
+
+
+def _partner_address_row(rpc, partner_id: int) -> dict:
+    """name / street / city / zip / state / country of one partner."""
+    data = rpc.read("res.partner", [partner_id],
+                    ["display_name", "street", "city", "zip",
+                     "state_id", "country_id"])[0]
+    return {
+        "id": partner_id,
+        "name": data.get("display_name") or "",
+        "street": data.get("street") or "",
+        "city": data.get("city") or "",
+        "zip": data.get("zip") or "",
+        "state_id": _m2o(data.get("state_id")),
+        "country_id": _m2o(data.get("country_id")),
+    }
+
+
+def warehouse_shipfrom_probe(ctx, order_id: int) -> dict:
+    """Can Avalara be given a usable ``shipFrom`` for this quotation's lines?
+
+    Reads the warehouse each ``sale.order.line`` actually ships from — which is
+    exactly what ``account_avatax_stock`` reads: ``sale.order`` builds the line
+    data as ``line['warehouse_id'] = line['base_line']['record'].warehouse_id``
+    (account_avatax_stock/models/sale_order.py:11), and ``sale.order.line.
+    warehouse_id`` is a stored computed field seeded from
+    ``order_id.warehouse_id`` (addons/sale_stock/models/sale_order_line.py:23
+    and 32-52). ``sale.order.warehouse_id`` itself is
+    addons/sale_stock/models/sale_order.py:27-30.
+
+    Returns ``{"applicable", "ok", "gap", "note", "warehouses"}``. ``ok`` is
+    True when every warehouse involved either has a complete address or IS the
+    company partner (the one case account_avatax_stock skips). ``applicable``
+    is False when nothing on this database can add a line-level address, in
+    which case ``ok`` stays True and no case is gated.
+    """
+    rpc = ctx.adapter.rpc
+    probe = {"applicable": True, "ok": True, "gap": "", "note": "",
+             "warehouses": []}
+
+    if not rpc.model_exists("stock.warehouse") or not rpc.field_exists(
+            "sale.order", "warehouse_id"):
+        probe["applicable"] = False
+        probe["note"] = (
+            "sale.order.warehouse_id does not exist on this database "
+            "(addons/sale_stock is not installed), so no line-level shipFrom "
+            "can be built and this gate does not apply")
+        return probe
+
+    # account_avatax_stock is the module that adds the line-level addresses.
+    # ir.module.module is readable to base.group_system only (odoo/addons/base/
+    # security/ir.model.access.csv:25), so an unreadable state is reported and
+    # treated as installed — which is the module's own auto_install default
+    # (account_avatax_stock/__manifest__.py: 'auto_install': True).
+    try:
+        rows = rpc.search_read("ir.module.module",
+                               [("name", "=", AVATAX_STOCK_MODULE)],
+                               ["state"], limit=1)
+        state = rows[0]["state"] if rows else "not present"
+    except OdooRPCError as exc:
+        state = f"unreadable ({exc})"
+    if state in ("uninstalled", "uninstallable", "not present"):
+        probe["applicable"] = False
+        probe["note"] = (
+            f"{AVATAX_STOCK_MODULE} is {state} on this database, so no "
+            f"line-level shipFrom is sent and this gate does not apply")
+        return probe
+    probe["note"] = f"{AVATAX_STOCK_MODULE} state: {state}"
+
+    order = rpc.read("sale.order", [order_id],
+                     ["name", "warehouse_id", "company_id"])[0]
+    company_id = _m2o(order.get("company_id"))
+    company_partner_id = None
+    if company_id:
+        company_partner_id = _m2o(
+            rpc.read("res.company", [company_id], ["partner_id"])[0]
+            .get("partner_id"))
+
+    # The LINE warehouse is what account_avatax_stock reads; the order's is
+    # only its seed, and a route rule can move a line to another warehouse
+    # (sale_order_line.py:36-52). Prefer the line values when they exist.
+    warehouse_ids, source = [], "sale.order.line.warehouse_id"
+    if rpc.field_exists("sale.order.line", "warehouse_id"):
+        for row in rpc.search_read("sale.order.line",
+                                   [("order_id", "=", order_id)],
+                                   ["warehouse_id"]):
+            wid = _m2o(row.get("warehouse_id"))
+            if wid and wid not in warehouse_ids:
+                warehouse_ids.append(wid)
+    else:
+        source = "sale.order.warehouse_id"
+        order_wh = _m2o(order.get("warehouse_id"))
+        if order_wh:
+            warehouse_ids = [order_wh]
+    probe["note"] += f"; warehouse(s) read from {source}"
+
+    gaps = []
+    for warehouse_id in warehouse_ids:
+        wh = rpc.read("stock.warehouse", [warehouse_id],
+                      ["name", "code", "partner_id"])[0]
+        partner_id = _m2o(wh.get("partner_id"))
+        row = {"id": warehouse_id, "name": wh.get("name") or "",
+               "code": wh.get("code") or "", "partner_id": partner_id,
+               "partner": None, "verdict": ""}
+        label = (f"stock.warehouse #{warehouse_id} "
+                 f"{(wh.get('name') or '')!r} (short name "
+                 f"{(wh.get('code') or '')!r})")
+        if not partner_id:
+            row["verdict"] = "no Address at all"
+            gaps.append(f"{label} has NO Address at all — its "
+                        f"stock.warehouse.partner_id is empty")
+        elif company_partner_id and partner_id == company_partner_id:
+            row["verdict"] = "is the company partner — skipped by Odoo"
+        else:
+            partner = _partner_address_row(rpc, partner_id)
+            row["partner"] = partner
+            missing = [name for name, value in
+                       (("country_id", partner["country_id"]),
+                        ("state_id", partner["state_id"]),
+                        ("zip", partner["zip"])) if not value]
+            if missing:
+                row["verdict"] = f"Address incomplete: {', '.join(missing)}"
+                gaps.append(
+                    f"{label} has Address res.partner #{partner_id} "
+                    f"{partner['name']!r}, which is missing "
+                    f"{', '.join(missing)}")
+            else:
+                row["verdict"] = "complete"
+        probe["warehouses"].append(row)
+
+    probe["ok"] = not gaps
+    probe["gap"] = "; ".join(gaps)
+    return probe
+
+
+def require_warehouse_shipfrom(ctx, order_id: int, detail: str) -> dict:
+    """BLOCK a QUOTATION case whose shipFrom address cannot be built.
+
+    Called only where a warehouse is genuinely involved — i.e. on
+    ``sale.order``. Invoice cases never reach it: ``account_avatax_stock``
+    resolves an invoice line's warehouse from its delivery moves and leaves it
+    ``None`` unless the line's stock moves resolve to exactly one shipping
+    address (account_avatax_stock/models/account_move.py:10-15), so a
+    stand-alone customer invoice sends no line-level address at all.
+    """
+    probe = warehouse_shipfrom_probe(ctx, order_id)
+    if not probe["applicable"]:
+        summary = "gate not applicable"
+    else:
+        summary = " | ".join(
+            f"#{w['id']} {w['name']!r}: {w['verdict']}"
+            for w in probe["warehouses"]) or "no warehouse on any line"
+    ctx.log(f"shipFrom probe on sale.order #{order_id} — {probe['note']}; "
+            f"{summary}")
+    if probe["applicable"] and not probe["ok"]:
+        ctx.blocked(
+            f"this quotation cannot be taxed by AvaTax on this database "
+            f"because its shipFrom address cannot be built: {probe['gap']}. "
+            f"Odoo sends that empty address to Avalara as 'country': False and "
+            f"Avalara rejects the entire CreateTransaction with 'Unknown "
+            f"country name or code (FALSE)', so the document never receives a "
+            f"tax figure and no FG-05 quotation expectation can be evaluated "
+            f"(needed for: {detail}). This is a BLOCKED verdict, not a pass: "
+            f"FG-05's quotation coverage is unavailable until the warehouse "
+            f"address is fixed. {SHIPFROM_REMEDY} {ODOO_SHIPFROM_DEFECT}")
+    return probe
+
+
 # ---------------------------------------------------------------- fixtures
 def _ref_country(rpc, code: str):
     found = rpc.search("res.country", [("code", "=", code)], limit=1)
@@ -709,6 +946,102 @@ def account_code(ctx, account_id) -> str:
         return ""
     data = ctx.adapter.rpc.read("account.account", [account_id], ["code"])
     return data[0]["code"] if data else ""
+
+
+# ------------------------------------------------ tax account plausibility
+# ``account.tax.repartition.line.account_id`` is "Account on which to post the
+# tax amount" (addons/account/models/account_tax.py:5287-5291), and it is where
+# ``account_avatax`` puts the fiscal position's Avatax Invoice / Refund Account
+# (account_avatax/models/account_external_tax_mixin.py:187 and :191). What
+# counts as a sane account for that is taken from Odoo's own source, never from
+# an opinion about charts of accounts:
+#
+#   * the field's own domain refuses ``asset_receivable``, ``liability_payable``
+#     and ``off_balance`` outright (account_tax.py:5289);
+#   * ``_compute_use_in_tax_closing`` (account_tax.py:5310-5317) drops any tax
+#     repartition account whose ``internal_group`` is 'income' or 'expense' out
+#     of the tax closing entry, so tax booked there never reaches the return;
+#   * ``internal_group`` is ``account_type.split('_', 1)[0]``
+#     (addons/account/models/account_account.py:649-650), and the account_type
+#     selection is account_account.py:44-65.
+#
+# What is left, and what a sales-tax control account actually is, is a tax
+# liability — money collected and owed to the authority — or, in the charts that
+# book recoverable tax on the asset side, a current asset.
+TAX_ACCOUNT_EXPECTED_TYPES = ("liability_current", "liability_non_current",
+                              "asset_current")
+
+TAX_ACCOUNT_DOMAIN_REFUSED = ("asset_receivable", "liability_payable",
+                              "off_balance")
+
+
+def _internal_group(account_type: str) -> str:
+    """Odoo's own derivation — account_account.py:649-650."""
+    return (account_type or "").split("_", 1)[0]
+
+
+def account_row(ctx, account_id) -> dict:
+    """id / code / name / account_type / internal_group for one account."""
+    if not account_id:
+        return {"id": None, "code": "", "name": "", "account_type": "",
+                "internal_group": ""}
+    data = ctx.adapter.rpc.read("account.account", [account_id],
+                                ["code", "name", "account_type"])
+    if not data:
+        return {"id": account_id, "code": "", "name": "", "account_type": "",
+                "internal_group": ""}
+    account_type = data[0].get("account_type") or ""
+    return {
+        "id": account_id,
+        "code": data[0].get("code") or "",
+        "name": data[0].get("name") or "",
+        "account_type": account_type,
+        "internal_group": _internal_group(account_type),
+    }
+
+
+def tax_account_verdict(row: dict) -> tuple[bool, str]:
+    """``(plausible, why_not)`` for an account used to POST a tax amount."""
+    account_type = row.get("account_type") or ""
+    group = row.get("internal_group") or _internal_group(account_type)
+    if not account_type:
+        return False, ("the account carries no Type at all, so nothing can be "
+                       "said about where the tax would land")
+    if account_type in TAX_ACCOUNT_DOMAIN_REFUSED:
+        return False, (f"Odoo's own domain on account.tax.repartition.line."
+                       f"account_id refuses {account_type!r} outright "
+                       f"(addons/account/models/account_tax.py:5289)")
+    if group in ("income", "expense"):
+        return False, (f"{account_type!r} is in the {group!r} internal group, "
+                       f"and _compute_use_in_tax_closing (addons/account/"
+                       f"models/account_tax.py:5310-5317) drops an income or "
+                       f"expense repartition account OUT of the tax closing "
+                       f"entry — tax posted here is booked as "
+                       f"{'revenue' if group == 'income' else 'cost'} and "
+                       f"never reaches the tax return")
+    if account_type == "asset_cash":
+        return False, ("this is a BANK/CASH account: posting a tax charge to "
+                       "it records the tax as money already in the bank "
+                       "instead of a liability owed to the tax authority, and "
+                       "it puts phantom entries into every bank "
+                       "reconciliation on that account")
+    if account_type == "liability_credit_card":
+        return False, ("this is a credit-card liability account: it is "
+                       "reconciled against a card statement, not remitted to "
+                       "a tax authority")
+    if account_type not in TAX_ACCOUNT_EXPECTED_TYPES:
+        return False, (f"{account_type!r} is not a tax control account — a "
+                       f"sales tax collected on behalf of an authority is a "
+                       f"liability (one of "
+                       f"{', '.join(TAX_ACCOUNT_EXPECTED_TYPES)})")
+    return True, ""
+
+
+def describe_account(row: dict) -> str:
+    """One evidence-line description of an account."""
+    return (f"account.account #{row.get('id')} code {row.get('code')!r} "
+            f"{row.get('name')!r} Type={row.get('account_type')!r} "
+            f"(internal group {row.get('internal_group')!r})")
 
 
 # ------------------------------------------------------ untruncated errors

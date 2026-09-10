@@ -98,6 +98,34 @@ Documented adaptations
   ``"Authentication success." / "Authentication failed."``
   (``account_avatax/models/res_company.py:138``); a runner user whose UI
   language is not English would receive the translated wording.
+
+What the live sandbox run confirmed — step 6 is a TRUE POSITIVE
+--------------------------------------------------------------
+Against the live Avalara sandbox, step 6's untruncated ``error.data.message``
+came back as the single word ``"details"`` — 1 word, 7 letters — **after** the
+change that made this step read the full server text rather than the
+transport's last line. That rules the transport out and leaves exactly one
+explanation, and it is in source: ``_handle_response`` subscripts
+``response['error']['details']`` unconditionally
+(``account_avatax/models/account_external_tax_mixin.py:294``) once line 292 has
+proved only that ``response['error']`` exists, so an Avalara error payload
+without a ``details`` key raises ``KeyError('details')``; nothing on the
+``_get_external_taxes`` path (line 217) catches it, and Odoo renders the
+uncaught exception through ``odoo.loglevels.exception_to_unicode``
+(``odoo/loglevels.py:106-108``), which returns ``'\\n'.join(map(str, e.args))``
+= ``"details"``.
+
+So the case did not fail because a readable message was mis-measured: it
+caught a **crash with a meaningless message**, which is precisely what its
+title forbids. Nothing about the assertion is changed here — the readability
+floor stays where it was, and the case keeps FAILING. What is added is
+evidence: the message source is stated on every run, and when the message is
+that bare word the failure text carries
+:data:`KEYERROR_DETAILS_DIAGNOSIS`, which names the subscript, the
+serialisation, and the fact that this belongs to Odoo Enterprise
+``account_avatax`` and not to ``mmg_account_avatax_enhancement`` (whose
+``_handle_response`` only records ``totalTax`` before delegating to
+``super()``).
 """
 from __future__ import annotations
 
@@ -141,6 +169,43 @@ RPC_ERROR_PREFIX = "account.move.button_external_tax_calculation failed: "
 COMPUTE_TAXES_METHOD = "button_external_tax_calculation"
 
 _TAG_RE = re.compile(r"<[^>]+>")
+
+# The whole server message being the bare word "details" is not a message at
+# all — it is the argument of a Python KeyError, and it is reproduced from
+# source below rather than guessed. See KEYERROR_DETAILS_DIAGNOSIS.
+KEYERROR_DETAILS_BODIES = ("details", "'details'", '"details"')
+
+KEYERROR_DETAILS_DIAGNOSIS = (
+    "DIAGNOSIS — this is not a readable message and it is not a test "
+    "artefact: it is a CRASH inside Odoo Enterprise account_avatax, which is "
+    "exactly what TC-TAX-017 exists to catch, so this assertion is a TRUE "
+    "POSITIVE and must keep failing. The whole server text is the single word "
+    "'details', which is the argument of a Python KeyError. "
+    "account_avatax/models/account_external_tax_mixin.py:294 subscripts "
+    "response['error']['details'] UNCONDITIONALLY, after line 292 has proved "
+    "only that response['error'] exists — so an Avalara error payload that "
+    "carries no 'details' key raises KeyError('details') inside "
+    "_handle_response. Nothing on the path catches it: _handle_response is "
+    "called from _get_external_taxes at line 217 and the KeyError propagates "
+    "out of button_external_tax_calculation. Odoo then serialises the uncaught "
+    "exception with odoo.loglevels.exception_to_unicode "
+    "(odoo/loglevels.py:106-108), which returns '\\n'.join(map(str, e.args)) "
+    "— i.e. 'details' — as error.data.message. Route the defect to Odoo "
+    "Enterprise account_avatax: mmg_account_avatax_enhancement only extends "
+    "_handle_response to record Avalara's totalTax and then delegates to "
+    "super() (mmg_account_avatax_enhancement/models/"
+    "account_external_tax_mixin.py:99-110), so it neither causes nor could "
+    "prevent this. A correct fix is response['error'].get('details') or [] "
+    "with a fallback to response['error'].get('message')."
+)
+
+# Where the step-6 message came from, so the evidence says plainly whether the
+# readability verdict judged the SERVER's text or the transport's remnant.
+FULL_MESSAGE_SOURCE = ("the SERVER's untruncated error.data.message, re-read "
+                       "through tests.fg05.common.server_error_message")
+ADAPTER_MESSAGE_SOURCE = ("the ADAPTER's last-line-only message "
+                          "(adapters/base.py:156) — the untruncated re-read "
+                          "was not available")
 
 MANUAL_RECOVERY = (
     "MANUAL RECOVERY REQUIRED: open Accounting > Configuration > Settings > "
@@ -279,7 +344,7 @@ def _test_connection(ctx):
 
 
 def _compute_outcome(ctx, move_id, *, full_message=False):
-    """Click Compute Taxes → ``(raised, message)``.
+    """Click Compute Taxes → ``(raised, message, source)``.
 
     The workbook expects a message on the failure path, so the RPC error is
     captured and asserted on rather than being allowed to ERROR the test.
@@ -291,6 +356,13 @@ def _compute_outcome(ctx, move_id, *, full_message=False):
     (…/account_external_tax_mixin.py:287-295), so the truncated form would
     have step 6 judge the transport rather than the product's own message.
 
+    ``source`` names which of the two the returned message actually is, so the
+    evidence can state it instead of implying it: the re-read can legitimately
+    fall back (``server_error_message`` returns ``""`` when the repeat cannot
+    be issued), and a readability verdict reached on the transport's remnant
+    would mean something quite different from one reached on the server's own
+    text.
+
     Only step 6 asks for it. The re-issued call is a second
     ``create_transaction`` attempt: at step 6 the API KEY is deliberately
     invalid, so Avalara rejects it and nothing is filed. Step 10 runs with the
@@ -299,14 +371,16 @@ def _compute_outcome(ctx, move_id, *, full_message=False):
     """
     try:
         compute_taxes(ctx, "account.move", move_id)
-        return False, ""
+        return False, "", ""
     except OdooRPCError as exc:
         message = str(exc)
+        source = ADAPTER_MESSAGE_SOURCE
         if full_message:
-            message = server_error_message(
-                ctx, "account.move", COMPUTE_TAXES_METHOD,
-                [move_id]) or message
-        return True, message
+            full = server_error_message(
+                ctx, "account.move", COMPUTE_TAXES_METHOD, [move_id])
+            if full:
+                message, source = full, FULL_MESSAGE_SOURCE
+        return True, message, source
 
 
 @test_case(
@@ -479,13 +553,16 @@ def test_tax_017(ctx):
                 # adapters/base.py:156 kept. Safe here — the credential is
                 # invalid at this point, so the repeat is a second rejected
                 # authentication and files no document.
-                raised, message = _compute_outcome(ctx, move_id,
-                                                   full_message=True)
+                raised, message, source = _compute_outcome(ctx, move_id,
+                                                           full_message=True)
                 message = _redact(message, [original_key])
+                # State plainly WHICH text the readability verdict below is
+                # about — the confirmation that the untruncated path is really
+                # the one in use on this step, rather than an assumption.
+                ctx.log(f"Step 6 message source: {source or 'no error raised'}")
                 # The If-It-Fails column asks for this text verbatim on the
                 # defect, so the WHOLE message is logged.
-                ctx.log(f"Step 6 message (full server text, re-read "
-                        f"untruncated via common.server_error_message): "
+                ctx.log(f"Step 6 message (captured in full, nothing trimmed): "
                         f"{message!r}")
                 ctx.check_true(
                     "Step 6: Compute Taxes reports an error instead of "
@@ -505,6 +582,29 @@ def test_tax_017(ctx):
                 words = [w for w in body.split()
                          if any(c.isalpha() for c in w)]
                 letters = sum(1 for c in body if c.isalpha())
+                # Self-diagnosis, not a weakening: the floor below is
+                # untouched, and this only explains what the failure means so
+                # nobody re-opens it as a test artefact. The condition is
+                # deliberately exact — the WHOLE untruncated server message
+                # being the bare word "details" has exactly one explanation in
+                # source, reproduced in KEYERROR_DETAILS_DIAGNOSIS.
+                diagnosis = ""
+                if (source == FULL_MESSAGE_SOURCE
+                        and body.strip() in KEYERROR_DETAILS_BODIES):
+                    diagnosis = (f" — {KEYERROR_DETAILS_DIAGNOSIS} The message "
+                                 f"was read from {source}, so it is the "
+                                 f"server's own complete text and not a "
+                                 f"transport remnant.")
+                    ctx.log("!!! FINDING — Odoo Enterprise account_avatax "
+                            "defect (TRUE POSITIVE; this case must keep "
+                            "failing). " + KEYERROR_DETAILS_DIAGNOSIS)
+                elif body.strip() in KEYERROR_DETAILS_BODIES:
+                    diagnosis = (f" — NOTE: the message is the bare word "
+                                 f"'details', which is the KeyError shape "
+                                 f"described in KEYERROR_DETAILS_DIAGNOSIS, "
+                                 f"but it was read from {source}; re-run with "
+                                 f"the untruncated path available to confirm "
+                                 f"the server sent nothing more.")
                 # Asserted on the WHOLE server message, not on the
                 # fragment the transport left. _handle_response returns
                 # "<Odoo title>\n<Avalara detail>"
@@ -525,14 +625,15 @@ def test_tax_017(ctx):
                     "screen and not a bare code",
                     bool(body.strip()) and letters >= 8,
                     actual_desc=f"{len(words)} word(s) / {letters} letter(s): "
-                                f"{body!r}")
+                                f"{body!r}{diagnosis}")
                 matched = [word for word in CONNECTION_VOCABULARY
                            if word in body.lower()]
                 ctx.check_true(
                     "Step 6: the message explains that Avalara could not be "
                     "reached or the credentials were rejected",
                     bool(matched),
-                    actual_desc=f"vocabulary matched {matched} in {body!r}")
+                    actual_desc=f"vocabulary matched {matched} in "
+                                f"{body!r}{diagnosis}")
 
             with ctx.step("Step 7 (workbook): the invoice carries NO tax "
                           "figure and is still draft and editable"):
@@ -602,7 +703,10 @@ def test_tax_017(ctx):
 
         with ctx.step("Step 10 (workbook): return to the invoice and click "
                       "Compute Taxes"):
-            raised, message = _compute_outcome(ctx, move_id)
+            # No full_message here on purpose: repeating a SUCCESSFUL Compute
+            # Taxes would file a second Avalara document (see
+            # _compute_outcome), so step 10 keeps the adapter's message.
+            raised, message, _source = _compute_outcome(ctx, move_id)
             message = _redact(message, [original_key])
             ctx.check_true(
                 "Step 10: Compute Taxes succeeds once the correct key is "
