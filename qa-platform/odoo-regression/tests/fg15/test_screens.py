@@ -22,8 +22,8 @@ from framework.registry import test_case
 
 from .common import (CHANNEL, LOG_ACTION, MODULE, ORDER, PRODUCT_CHANNEL,
                      SWEEP_SCREENS, WORKFLOW, WORKFLOW_NAME, manual,
-                     observation, open_screen, require_connector, stores,
-                     trace)
+                     observation, open_screen, removal_allowed,
+                     require_connector, stores, trace)
 
 
 @test_case(
@@ -50,18 +50,41 @@ def test_uix_011(ctx):
 
     with ctx.step("Steps 1-2: every screen the workbook lists opens and "
                   "every view behind it builds"):
-        failures = []
+        failures, allowed = [], {}
         for letter, path in SWEEP_SCREENS:
             result = open_screen(ctx, path)
             opened[path] = result
             if result["error"]:
+                # A screen the client removed ON PURPOSE is not a broken
+                # screen. removal_allowed() gives evidence only for a menu
+                # that is genuinely archived, so a screen that is present
+                # and will not draw still fails here.
+                evidence = removal_allowed(ctx, path)
+                if evidence:
+                    allowed[path] = evidence
+                    ctx.log(f"  {letter}. ALLOWED {path} — "
+                            f"deliberately removed")
+                    ctx.log(f"        {evidence}")
+                    continue
                 failures.append(f"({letter}) {path} — {result['error']}")
                 ctx.log(f"  {letter}. FAILED  {path}")
                 ctx.log(f"        {result['error']}")
             else:
                 ctx.log(f"  {letter}. ok      {path} "
                         f"[{', '.join(result['views']) or result.get('kind', '')}]")
-        ctx.check("Every omnichannel screen opens and draws", [], failures)
+
+        if allowed:
+            observation(ctx,
+                        f"{len(allowed)} of the screens the workbook sweeps "
+                        f"are absent BY DESIGN and are not counted against "
+                        f"this case: {sorted(allowed)}. The citation is "
+                        f"logged above; the decision lives in "
+                        f"staging19_cleanup.sh step 4g, which re-applies it "
+                        f"on every staging rebuild, so this is not drift "
+                        f"waiting to be noticed.")
+
+        ctx.check("Every omnichannel screen opens and draws, or is a "
+                  "documented deliberate removal", [], failures)
 
     with ctx.step("Step 1f: the store form's every tab builds"):
         arch = rpc.call(CHANNEL, "get_view", view_type="form")["arch"]

@@ -26,7 +26,7 @@ from .common import (BULK_ACTIONS, CONTACT_PHONE_LABELS, FORBIDDEN, MARK,
                      RESTRICTED_BY_RIGHT, UNRESTRICTED, WORKFLOW,
                      WORKFLOW_NAME, attr, build_views, existing_menus,
                      field_attrs, finding, manual, observation, page_titles,
-                     require_v19, served_menus, trace)
+                     removal_allowed, require_v19, served_menus, trace)
 
 #: Screens TC-SMK-018 step 1 reads, as model + the view types it walks.
 LABEL_SCREENS = [
@@ -54,7 +54,13 @@ LABEL_SCREENS = [
                 "definition' pop-up is a symptom of. The named minimum from "
                 "step 4 is checked by name, no Magento menu may survive, "
                 "and menus that exist but are served to nobody are reported "
-                "rather than counted as present.",
+                "rather than counted as present. Step 7's own allowance "
+                "for a menu the client removed ON PURPOSE is honoured via "
+                "DELIBERATELY_REMOVED, which is not a softened assertion: "
+                "every entry cites where the decision is recorded, applies "
+                "only while the menu is genuinely archived — an active "
+                "menu that reaches nobody still FAILS — and is still "
+                "logged and reported as an observation.",
     traceability=trace("TC-SMK-003"))
 def test_smk_003(ctx):
     rpc = require_v19(ctx)
@@ -89,9 +95,20 @@ def test_smk_003(ctx):
                   "screen, an error page'", [], broken)
 
     with ctx.step("Step 4: the named minimum is all present"):
-        absent, why = [], {}
+        absent, why, allowed = [], {}, {}
         for path in NAMED_MENUS:
             if path in served:
+                continue
+            # Step 7's own escape hatch, and the only one: a menu that is
+            # absent because it was REMOVED ON PURPOSE, with the removal
+            # written down somewhere a reader can check. Everything else
+            # still fails below. removal_allowed() re-checks that the menu
+            # really is archived, so a broken screen cannot claim this.
+            evidence = removal_allowed(ctx, path)
+            if evidence:
+                allowed[path] = evidence
+                ctx.log(f"  ALLOWED {path} — deliberately removed")
+                ctx.log(f"        {evidence}")
                 continue
             absent.append(path)
             row = existing_menus(ctx).get(path)
@@ -146,9 +163,20 @@ def test_smk_003(ctx):
                         f"switched on; it is the other three entry points "
                         f"that are off.")
 
-        ctx.check("Every menu the workbook names by hand is served — step 7 "
-                  "allows a deliberate removal, but only Novobi's list can "
-                  "say which these are", [], absent)
+        if allowed:
+            observation(ctx,
+                        f"{len(allowed)} of the menus the workbook names by "
+                        f"hand are absent BY DESIGN and are not counted "
+                        f"against this case: {sorted(allowed)}. Step 7 "
+                        f"allows exactly that — 'or be on Novobi's list of "
+                        f"menus deliberately removed' — and each one is "
+                        f"honoured only while it is genuinely archived and "
+                        f"only with the citation logged above. If the "
+                        f"client ever wants these back, the change belongs "
+                        f"in staging19_cleanup.sh step 4g, not here.")
+
+        ctx.check("Every menu the workbook names by hand is served, or is a "
+                  "documented deliberate removal — step 7", [], absent)
 
     with ctx.step("Step 6: no Magento menu survives, anywhere"):
         # What step 6 asks a tester to confirm is what they can SEE, so the

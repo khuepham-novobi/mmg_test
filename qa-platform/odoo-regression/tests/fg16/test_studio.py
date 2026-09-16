@@ -81,9 +81,10 @@ def test_stu_006(ctx):
                 ctx.log(f"  {letter}. FAILED  {path}")
                 ctx.log(f"        {result['error']}")
             else:
-                ctx.log(f"  {letter}. ok      {path} "
-                        f"-> {result['action']['res_model']} "
-                        f"[{', '.join(result['views'])}]")
+                target = ((result.get("action") or {}).get("res_model")
+                          or result.get("kind") or "?")
+                ctx.log(f"  {letter}. ok      {path} -> {target} "
+                        f"[{', '.join(result['views']) or 'no view to build'}]")
 
         hidden = [p for p, r in opened.items() if r.get("hidden")]
         if hidden:

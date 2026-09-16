@@ -99,6 +99,45 @@ NAMED_MENUS = (
     "Job Queue > Queue > Job Functions",
 )
 
+#: Menus this client removed ON PURPOSE. TC-SMK-003 step 7 allows exactly
+#: this and nothing wider: "every menu that existed before must either be
+#: present, or be on Novobi's list of menus deliberately removed."
+#:
+#: THE RULES THIS LIST OBEYS, because an allowance is how a P0 case gets
+#: quietly weakened:
+#:  1. Every entry names WHERE the decision is written down. A path with no
+#:     citation is not evidence, it is an excuse, and does not go here.
+#:  2. An entry is honoured only while the menu is genuinely ARCHIVED. A
+#:     menu that is active and merely unreachable - broken action, missing
+#:     group - is a defect wearing a removal's clothes and still fails the
+#:     case. removal_allowed() enforces that; the list alone cannot.
+#:  3. The allowance is still LOGGED and still reported as an observation.
+#:     Nothing disappears; it moves from "fail" to "fail nothing, and tell
+#:     the reader why".
+DELIBERATELY_REMOVED = {
+    "E-commerce Connectors > Products > Product Variants":
+        "NOVOBI-514 - MMG hides every Product Variants menu under the E-commerce connector. The decision is recorded in mmg_19-custom/tools/staging19_cleanup.sh step 4g, whose WANT_OFF list re-archives 'multichannel_product.menu_omniborder_product_variants' on every staging rebuild and names the v15 enforcer that used to do it (mmg_multichannel_shopify, FG-10b, not ported). Measured on this database: 69,539 templates against 69,539 variants, and only 6 templates with more than one variant - the variant list shows nothing the product list does not.",
+}
+
+
+def removal_allowed(ctx, path: str) -> str:
+    """The evidence for ``path`` being absent on purpose, or "" if none.
+
+    Returns "" for a menu absent for any reason OTHER than being archived,
+    so a broken or group-gated screen can never borrow this list's
+    permission.
+    """
+    why = DELIBERATELY_REMOVED.get(path)
+    if not why:
+        return ""
+    row = existing_menus(ctx).get(path)
+    if not row:
+        return ""                       # gone entirely, not archived
+    if row.get("active"):
+        return ""                       # active but unreachable = a defect
+    return why
+
+
 #: Step 6: nothing Magento may survive. Matched case-insensitively against
 #: menu names and paths.
 FORBIDDEN = ("magento",)

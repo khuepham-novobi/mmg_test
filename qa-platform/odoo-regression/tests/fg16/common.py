@@ -273,6 +273,23 @@ def open_screen(ctx, path: str) -> dict:
     if not action_id:
         return {"menu": entry, "views": {}, "hidden": False,
                 "error": f"menu '{path}' carries no action"}
+
+    # Only a window action has views to build. A menu can equally point at
+    # a server action, a client action or a report — 'Physical Inventory'
+    # points at an ir.actions.server — and those models carry no
+    # `res_model`/`view_mode` at all, so asking for them raises and a
+    # perfectly healthy screen gets reported as broken. FG-18's walk hit
+    # this first; the same shape belongs here.
+    if model != "ir.actions.act_window":
+        try:
+            action = rpc.read(model, [action_id], ["name"])[0]
+        except OdooRPCError as exc:
+            return {"menu": entry, "views": {}, "hidden": False,
+                    "error": f"action behind '{path}' could not be read: "
+                             f"{exc}"}
+        return {"menu": entry, "action": action, "views": {}, "error": "",
+                "hidden": False, "kind": model}
+
     try:
         action = rpc.read(model, [action_id],
                           ["name", "res_model", "view_mode", "domain",
