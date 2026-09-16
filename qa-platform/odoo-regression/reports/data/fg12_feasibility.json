@@ -4,21 +4,73 @@
  "_safety": "ecommerce.channel id 3 is the gallery's LIVE Shopify store, with inventory sync on. Every rule and exclusion this suite creates is scoped applied_on='0_product_variant' onto a scratch product the suite created, so it can never match one of the gallery's items (include_inventory_sync.is_product_matching keys on product_id equality). The only write made to the store's own configuration is TC-FUL-001's warehouse probe, which the check_active_warehouses constraint must refuse — and it restores what it found BEFORE it asserts anything. bulk_inventory_sync and do_update_shipment_to_channel are never called: both reach Shopify.",
  "_residual_manual": "Reading the Available figure off a real listing (TC-FUL-002/003/005 — needs a product.channel.variant mapping, which only an import from the store creates); pressing the bulk-update button (TC-FUL-009 steps 7-8 and 11, which the workbook itself forbids while sync is on); unticking Enable Export Shipment and pressing Update to Store (TC-FUL-014 steps 4-8); ticking the settings off against Novobi's FG-08 TC-CHN-001 printout (TC-FUL-001, TC-FUL-015).",
  "_findings": {
-  "BC-FG12-001": "P0. stock.service.picking.action_confirm (multichannel_fulfillment/models/stock_service_picking.py:104) and stock.service.move.action_done (stock_service_move.py:134) both call float_is_zero(..., precision_digits=product_uom_id.rounding). uom.rounding is a float (0.001), not a digit count. v15's float_is_zero accepted anything and quietly evaluated 10**-0.001; v19 validates the argument and raises ValueError (odoo/tools/float_utils.py:170-174). Every Validate on every service transfer therefore dies before doing anything. Fix: precision_rounding= instead of precision_digits= in both places. Reported by TEST-FG12-FUL-017 and TEST-FG12-FUL-018, both of which FAIL on it.",
-  "BC-FG12-002": "P1. Confirming an order whose only lines are services fails with a NOT NULL violation on stock_service_move.date. Odoo 19's sale.order._compute_expected_date skips non-goods lines outright (addons/sale/models/sale_order.py:737-752); v15 took the minimum across every line (mmg_15/addons/sale/models/sale_order.py:332-345). StockServiceMove._get_stock_move_values still passes order.expected_date into stock.service.move.date, which is required=True (stock_service_move.py:16-18, 122). An order that also carries a goods line is unaffected. Fix: fall back to commitment_date or fields.Datetime.now() when expected_date is empty. Reported by TEST-FG12-FUL-017's last step.",
+  "BC-FG12-001": "P0. stock.service.picking.action_confirm (multichannel_fulfillment/models/stock_service_picking.py:104) and stock.service.move.action_done (stock_service_move.py:134) both call float_is_zero(..., precision_digits=product_uom_id.rounding). uom.rounding is a float (0.001), not a digit count. v15's float_is_zero accepted anything and quietly evaluated 10**-0.001; v19 validates the argument and raises ValueError (odoo/tools/float_utils.py:170-174). Every Validate on every service transfer therefore dies before doing anything. Fix: precision_rounding= instead of precision_digits= in both places. Reported by TEST-FG12-FUL-017 and TEST-FG12-FUL-018, both of which FAIL on it. FIXED in psus-medicine-man-gallery 91ea498 (as BC-031): precision_digits= -> precision_rounding= at both sites. TEST-FG12-FUL-017 and -018 now PASS.",
+  "BC-FG12-002": "P1. Confirming an order whose only lines are services fails with a NOT NULL violation on stock_service_move.date. Odoo 19's sale.order._compute_expected_date skips non-goods lines outright (addons/sale/models/sale_order.py:737-752); v15 took the minimum across every line (mmg_15/addons/sale/models/sale_order.py:332-345). StockServiceMove._get_stock_move_values still passes order.expected_date into stock.service.move.date, which is required=True (stock_service_move.py:16-18, 122). An order that also carries a goods line is unaffected. Fix: fall back to commitment_date or fields.Datetime.now() when expected_date is empty. Reported by TEST-FG12-FUL-017's last step. FIXED in psus-medicine-man-gallery 91ea498 (as BC-032): _get_stock_move_values falls back to sale_line_id._expected_date(). TEST-FG12-FUL-017's last step now PASSES.",
   "OBS-FG12-001": "ecommerce.channel._generate_exclude_domain is @api.private in v19 and cannot be called over RPC, so TC-FUL-005/006/007 assert the method's whole input (the o2m rows, their level and their targets) rather than the domain it returns. The child_of semantics TC-FUL-007 turns on are exercised directly through the ORM on the same operator and the same ids."
  },
- "TC-FUL-001": {"decision": "implemented", "test_id": "TEST-FG12-FUL-001", "reason": "Settings surface, the company domain on the warehouse list, and the check_active_warehouses refusal, probed against the live store with an unconditional restore. This database holds ONE warehouse, so the workbook's multi-warehouse steps are N/A as it instructs."},
- "TC-FUL-002": {"decision": "implemented", "test_id": "TEST-FG12-FUL-002", "reason": "The four Apply On levels, calc_available_qty at 50% and 10% of 20 on hand, the 0/150 refusals and the 0.01/100 boundaries, and the rule's deletion restoring the store's own rule set."},
- "TC-FUL-003": {"decision": "implemented", "test_id": "TEST-FG12-FUL-003", "reason": "The three worked cases (100% capped at 5, 50% capped at 5, 10% floored at 8), the maximum-of-0 and negative-minimum refusals, and the three columns on the rules list."},
- "TC-FUL-004": {"decision": "implemented", "test_id": "TEST-FG12-FUL-004", "reason": "Attempts A, B and C. The workbook says either answer to C is acceptable and that Novobi needs to know which: equal non-zero values are REFUSED (include_inventory_sync.py:126-129), and the case records that rather than asserting one way."},
- "TC-FUL-005": {"decision": "implemented", "test_id": "TEST-FG12-FUL-005", "reason": "Three Apply On levels, the row's name and targets, survival across a reload, whether a duplicate is allowed (it is), and the exclusion list restored exactly."},
- "TC-FUL-006": {"decision": "implemented", "test_id": "TEST-FG12-FUL-006", "reason": "The row names the variant and not the parent template, and holds that variant and no sibling — which is exactly the clause _generate_exclude_domain emits at the variant level."},
- "TC-FUL-007": {"decision": "implemented", "test_id": "TEST-FG12-FUL-007", "reason": "Categories is a many2many that holds more than one; child_of reaches the child category and not an unrelated one; the precedence note is on the rule form."},
- "TC-FUL-009": {"decision": "implemented", "test_id": "TEST-FG12-FUL-009", "reason": "The button's gating expression and its three states, the platform in its wording, and Last all inventory updated beside it. The press is not made: on THIS store none of bulk_inventory_sync's three guards would fire and the whole catalogue would be pushed to Shopify — the workbook's own step 11 forbids it too."},
- "TC-FUL-013": {"decision": "implemented", "test_id": "TEST-FG12-FUL-013", "reason": "The four storefront fields present and populated on real deliveries, Requested Service read-only, and Carrier/Tracking Reference read-only on state in ['cancel'] — the v19 behaviour the case exists to check. Read-only throughout."},
- "TC-FUL-014": {"decision": "implemented", "test_id": "TEST-FG12-FUL-014", "reason": "is_update_to_channel_needed is computed and requires an ID on Channel, sampled across storefront and hand-made deliveries. The refusal path is quoted from the guard rather than produced by switching the gallery's Enable Export Shipment off."},
- "TC-FUL-015": {"decision": "implemented", "test_id": "TEST-FG12-FUL-015", "reason": "The setting is present, is ON, and is the flag do_update_shipment_to_channel reads. Whether it is platform-gated in the view is reported rather than asserted blind — this database holds one store and it is Shopify."},
- "TC-FUL-017": {"decision": "implemented", "test_id": "TEST-FG12-FUL-017", "reason": "FAILS on BC-FG12-001. Everything before the Validate passes: the Other Fulfillments count and action, the read-only Partner, the three-state status bar, the four Items columns and their draft-only editability, and that the transfer holds the service line alone. The last step reports BC-FG12-002."},
- "TC-FUL-018": {"decision": "implemented", "test_id": "TEST-FG12-FUL-018", "reason": "FAILS on BC-FG12-001 at step 3 — the immediate-transfer pop-up cannot be raised at all, because raising it IS action_confirm. The pop-up's own content and its two buttons are asserted from the wizard view."}
+ "TC-FUL-001": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-001",
+  "reason": "Settings surface, the company domain on the warehouse list, and the check_active_warehouses refusal, probed against the live store with an unconditional restore. This database holds ONE warehouse, so the workbook's multi-warehouse steps are N/A as it instructs."
+ },
+ "TC-FUL-002": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-002",
+  "reason": "The four Apply On levels, calc_available_qty at 50% and 10% of 20 on hand, the 0/150 refusals and the 0.01/100 boundaries, and the rule's deletion restoring the store's own rule set."
+ },
+ "TC-FUL-003": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-003",
+  "reason": "The three worked cases (100% capped at 5, 50% capped at 5, 10% floored at 8), the maximum-of-0 and negative-minimum refusals, and the three columns on the rules list."
+ },
+ "TC-FUL-004": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-004",
+  "reason": "Attempts A, B and C. The workbook says either answer to C is acceptable and that Novobi needs to know which: equal non-zero values are REFUSED (include_inventory_sync.py:126-129), and the case records that rather than asserting one way."
+ },
+ "TC-FUL-005": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-005",
+  "reason": "Three Apply On levels, the row's name and targets, survival across a reload, whether a duplicate is allowed (it is), and the exclusion list restored exactly."
+ },
+ "TC-FUL-006": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-006",
+  "reason": "The row names the variant and not the parent template, and holds that variant and no sibling — which is exactly the clause _generate_exclude_domain emits at the variant level."
+ },
+ "TC-FUL-007": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-007",
+  "reason": "Categories is a many2many that holds more than one; child_of reaches the child category and not an unrelated one; the precedence note is on the rule form."
+ },
+ "TC-FUL-009": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-009",
+  "reason": "The button's gating expression and its three states, the platform in its wording, and Last all inventory updated beside it. The press is not made: on THIS store none of bulk_inventory_sync's three guards would fire and the whole catalogue would be pushed to Shopify — the workbook's own step 11 forbids it too."
+ },
+ "TC-FUL-013": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-013",
+  "reason": "The four storefront fields present and populated on real deliveries, Requested Service read-only, and Carrier/Tracking Reference read-only on state in ['cancel'] — the v19 behaviour the case exists to check. Read-only throughout."
+ },
+ "TC-FUL-014": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-014",
+  "reason": "is_update_to_channel_needed is computed and requires an ID on Channel, sampled across storefront and hand-made deliveries. The refusal path is quoted from the guard rather than produced by switching the gallery's Enable Export Shipment off."
+ },
+ "TC-FUL-015": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-015",
+  "reason": "The setting is present, is ON, and is the flag do_update_shipment_to_channel reads. Whether it is platform-gated in the view is reported rather than asserted blind — this database holds one store and it is Shopify."
+ },
+ "TC-FUL-017": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-017",
+  "reason": "PASSES since 91ea498 fixed BC-FG12-001 and BC-FG12-002; it FAILED on both before that. Covers: the Other Fulfillments count and action, the read-only Partner, the three-state status bar, the four Items columns and their draft-only editability, and that the transfer holds the service line alone. The last step reports BC-FG12-002."
+ },
+ "TC-FUL-018": {
+  "decision": "implemented",
+  "test_id": "TEST-FG12-FUL-018",
+  "reason": "PASSES since 91ea498 fixed BC-FG12-001; before that the immediate-transfer pop-up could not be raised at all, because raising it IS action_confirm. The pop-up's own content and its two buttons are asserted from the wizard view."
+ }
 }
