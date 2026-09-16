@@ -416,29 +416,91 @@ def sweep(ctx) -> dict:
         try:
             ids = rpc.search(model, domain, **seen_all) if products or orders \
                 else []
-            if ids:
-                rpc.unlink(model, ids)
-            removed[model] = len(ids)
         except OdooRPCError as exc:
             ctx.log(f"[warn] sweep {model}: {exc}")
             removed[model] = -1
+            continue
+        # Per record on failure, for the same reason as `_delete_or_archive`
+        # below: TC-LEG-005 validates a delivery and a done picking cannot
+        # be deleted, and in one batch that one picking was taking every
+        # cancelled picking down with it — leaving four products a run
+        # pinned by a stock move that should have gone.
+        removed[model] = _try_delete(ctx, model, ids)
 
     for model, ids in (("product.template", templates), (PARTNER, partners)):
-        try:
-            if ids:
-                rpc.unlink(model, ids)
-            removed[model] = len(ids)
-        except OdooRPCError as exc:
-            ctx.log(f"[warn] {model} delete refused ({exc}); archiving")
-            try:
-                rpc.write(model, ids, {"active": False})
-                removed[model] = -len(ids)
-            except OdooRPCError as exc2:
-                ctx.log(f"[warn] {model} archive failed: {exc2}")
-                removed[model] = -1
+        removed[model] = _delete_or_archive(ctx, model, ids)
 
     ctx.log(f"sweep: {removed}")
     return removed
+
+
+def _try_delete(ctx, model: str, ids: list) -> int:
+    """Delete what can be deleted, batch first then one at a time.
+
+    No archive fallback here: the models this is used on — invoices,
+    pickings, orders — are either deletable or genuinely pinned by
+    something the case itself had to create (a validated delivery, a posted
+    entry), and archiving those would hide the fact rather than record it.
+    """
+    if not ids:
+        return 0
+    rpc = ctx.adapter.rpc
+    try:
+        rpc.unlink(model, ids)
+        return len(ids)
+    except OdooRPCError:
+        pass
+    deleted = 0
+    for record_id in ids:
+        try:
+            rpc.unlink(model, [record_id])
+            deleted += 1
+        except OdooRPCError:
+            pass
+    if deleted != len(ids):
+        ctx.log(f"{model}: {deleted} of {len(ids)} deleted; the rest are "
+                f"pinned by a validated delivery or a posted entry")
+    return deleted
+
+
+def _delete_or_archive(ctx, model: str, ids: list) -> int:
+    """Delete what can be deleted; archive only what genuinely refuses.
+
+    A batch ``unlink`` is all-or-nothing: one undeletable row takes the
+    whole call down, and a naive fallback then archives every record in the
+    batch. That is what happened here — one contact pinned by a POSTED
+    invoice was archiving twelve others that had nothing pointing at them,
+    and the residue grew by a dozen rows a run instead of by the three that
+    are genuinely stuck.
+
+    So the batch is tried first (it is the fast path and usually works),
+    and only on failure is each record retried on its own.
+    """
+    if not ids:
+        return 0
+    try:
+        rpc = ctx.adapter.rpc
+        rpc.unlink(model, ids)
+        return len(ids)
+    except OdooRPCError:
+        pass
+
+    rpc = ctx.adapter.rpc
+    deleted, stuck = 0, []
+    for record_id in ids:
+        try:
+            rpc.unlink(model, [record_id])
+            deleted += 1
+        except OdooRPCError:
+            stuck.append(record_id)
+    if stuck:
+        try:
+            rpc.write(model, stuck, {"active": False})
+        except OdooRPCError as exc:
+            ctx.log(f"[warn] {model} archive failed for {stuck}: {exc}")
+        ctx.log(f"{model}: {deleted} deleted, {len(stuck)} archived "
+                f"(something still points at them)")
+    return deleted
 
 
 def leftovers(ctx) -> int:
