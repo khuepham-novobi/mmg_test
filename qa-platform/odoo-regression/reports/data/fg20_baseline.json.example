@@ -1,0 +1,43 @@
+{
+  "_what_this_is": "Novobi's Odoo 15 timings, in seconds, for the FG-20 performance cases. Copy this file to fg20_baseline.json, fill in the numbers, and the FG-20 tests stop blocking and start judging — no change to any test. Until then every FG-20 case blocks, which is what its own precondition instructs: 'Without them this case cannot be judged — record it as Blocked rather than guessing.'",
+  "_how_to_fill_it": "Run each FG-20 test once. Its CSV artifact lists the exact step labels it measured, in the 'step' column. Put the v15 seconds for the same step under the same label here. A label you leave out, or leave as null, is reported as an uncompared gap rather than quietly passing.",
+  "_tolerance": "The tests judge at 1.5x, which is the workbook's own wording: 'anything slower than about one and a half times the old system is a FAIL'. It lives in TOLERANCE in tests/fg20/common.py.",
+  "_a_caution_worth_reading": "The v19 numbers these are compared against are SERVER times — the web_search_read the list view actually issues. The workbook's stopwatch measures that plus transport plus render. If Novobi's v15 figures were taken with a stopwatch, the two are not the same measurement and the ratio will flatter v19. Either take the v15 numbers the same way, or take one stopwatch run on each side to calibrate the difference first.",
+
+  "TC-PERF-001": {
+    "product list, default width": null,
+    "product list, 500 rows": null,
+    "product search for 'art'": null,
+    "product list grouped by category": null,
+    "expanding the largest category group": null
+  },
+  "TC-PERF-002": {
+    "order list, default width": null,
+    "order list, 500 rows": null,
+    "order list filtered to Cancelled": null,
+    "orders grouped by Shipping Status": null,
+    "expanding the largest Shipping Status group (shipped)": null,
+    "orders grouped by Store": null
+  },
+  "TC-PERF-003": {
+    "invoice list, default width": null,
+    "invoice list, 500 rows": null
+  },
+  "TC-PERF-004": {
+    "reading the taxes of 1,000 products": null
+  },
+  "TC-PERF-007": {
+    "Order Import: opening with the default filters": null,
+    "Order Import: filters cleared": null,
+    "Order Import: 500 rows": null,
+    "Order Import: grouped by Status": null,
+    "Product Import: opening with the default filters": null,
+    "Product Import: filters cleared": null,
+    "Product Import: 500 rows": null,
+    "Product Import: grouped by Status": null,
+    "Product Export: opening with the default filters": null,
+    "Product Export: filters cleared": null,
+    "Product Export: 500 rows": null,
+    "Product Export: grouped by Status": null
+  }
+}
