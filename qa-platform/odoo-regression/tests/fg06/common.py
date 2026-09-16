@@ -1576,6 +1576,17 @@ def residual_manual_step(ctx, text: str):
     ctx.log(f"RESIDUAL MANUAL STEP — {text}")
 
 
+def finding(ctx, text: str):
+    """Report something real that is deliberately not failing this case.
+
+    Same helper as the FG-15/16/18 suites. Use it where the evidence is
+    solid but the workbook's Expected Result does not cover the point, so
+    a FAIL would put a defect in the client's record that no tester can
+    reproduce from the case they were given.
+    """
+    ctx.log(f"FINDING — {text}")
+
+
 # ----------------------------------------------------------------- sweeping
 def sweep_fg06(ctx):
     """Remove leftovers from previous FG-06 runs — marker-scoped only.

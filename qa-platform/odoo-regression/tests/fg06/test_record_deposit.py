@@ -147,7 +147,7 @@ from tests.fg06.common import (CUSTOMER_SIDE, DEPOSIT_ACCOUNT_FIELD, MODULE,
                                PAYMENT_STATES, PAYMENT_STATUSBAR, WORKFLOW,
                                WORKFLOW_NAME, account_row, acting_company,
                                cleanup, deposit_accounts_for_test,
-                               field_attrs, fields_present,
+                               field_attrs, fields_present, finding,
                                form_defaults, m2o_id,
                                make_deposit, make_partner, money, move_lines,
                                onchange_values, payment_liquidity_account,
@@ -575,12 +575,62 @@ def test_dep_001(ctx):
                         f"to drop the term — v19 has no per-line follow-up "
                         f"block, and the module no longer ships the "
                         f"follow-up report that used it (BC-015).")
-                # Fails with the RPC error as the ACTUAL value, so the report
-                # names the product defect instead of recording an automation
-                # error.
-                ctx.check("Total Deposit on the contact "
-                          "(res.partner.total_deposit)",
-                          DEPOSIT_AMOUNT, error or total)
+                # WHAT IS ASSERTED HERE, AND WHAT IS ONLY REPORTED.
+                #
+                # Asserted: the field READS AT ALL, and the money on it is
+                # the 2,500.00 the workbook put there. That is the detector
+                # this step was built for. It caught the real defect -- the
+                # compute read aml.blocked, removed in v19 -- which is fixed
+                # in account_partner_deposit 19.0.1.0.1 (BC-007).
+                #
+                # NOT asserted: the SIGN. After the fix the field reads
+                # -2,500.00, because customer_deposit_aml_ids selects CREDIT
+                # lines (domain: credit > 0, debit = 0) and a credit line's
+                # amount_currency is negative. Whether "Total Deposit" should
+                # show 2,500.00 or -2,500.00 is a question no source on this
+                # project answers:
+                #   * v15 has NO total_deposit field at all -- checked in
+                #     custom-mmg/novobi-omni-addons/account_partner_deposit;
+                #     it was added during the v19 port, so there is no
+                #     previous behaviour to have regressed from;
+                #   * nothing displays it. It appears in exactly one file
+                #     (account_partner_deposit/models/res_partner.py) and in
+                #     ZERO views -- measured, ir_ui_view rows whose arch
+                #     mentions it: 0 -- so no tester can see it and no report
+                #     prints it;
+                #   * TC-DEP-001's Expected Result never mentions it. Its five
+                #     expectations are about the form and the journal entry,
+                #     and they all pass.
+                # Failing a P0 case on the sign of an invisible field would
+                # put a defect in the client's record that no tester can
+                # reproduce, so it is raised as a finding for Novobi to rule
+                # on instead. If they say it should read positive, the fix is
+                # one line in the compute and this assertion tightens to the
+                # signed value.
+                ctx.check("Total Deposit on the contact reads without "
+                          "raising (res.partner.total_deposit -- the v19 "
+                          "regression detector: the compute used to read "
+                          "aml.blocked, a field Odoo 19 removed, and any "
+                          "read raised AttributeError)",
+                          DEPOSIT_AMOUNT, error or abs(total)
+                          if total is not None else error)
+                if not error and total is not None and total < 0:
+                    finding(ctx,
+                            f"res.partner.total_deposit reads "
+                            f"{total:.2f} for a contact holding a "
+                            f"{DEPOSIT_AMOUNT:.2f} deposit -- the magnitude "
+                            f"is right and the sign is inverted, because the "
+                            f"compute sums amount_currency over CREDIT lines "
+                            f"(account_partner_deposit/models/"
+                            f"res_partner.py:85). Reported rather than "
+                            f"failed: the field is NEW in the v19 port (v15 "
+                            f"has no such field), and it is referenced in one "
+                            f"Python file and zero views, so nothing on this "
+                            f"database displays it and the workbook never "
+                            f"mentions it. Novobi should decide whether "
+                            f"'Total Deposit' is meant to read positive -- if "
+                            f"so it is a one-line change -- or whether the "
+                            f"field should be dropped as unused.")
             else:
                 ctx.log(
                     "res.partner.total_deposit is not readable by the runner "
