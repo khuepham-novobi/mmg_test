@@ -22,8 +22,21 @@ services:
       # from shadowing each other.
       - /app/venv
       # Run history and evidence survive a rebuild.
+      #
+      # NOTE: this volume SHADOWS the repo's data/ directory, which arrives
+      # with the `.:/app` mount above. data/ is gitignored, so
+      # data/test_registry.json reaches the container by neither route — not
+      # by git pull, not by the source mount. It has to be generated INSIDE
+      # the container, which is what the workbook mount below is for.
+      # Without it the backend loads zero test cases and the dashboard shows
+      # no workflows at all, while the test scripts still register normally.
       - qa-data:/app/data
       - qa-artifacts:/app/artifacts
+      # The Excel workbook — source of truth for the test-case registry.
+      # Read-only: scripts/sync_registry.py must never write to it.
+      #   docker compose exec mmg-qa python scripts/sync_registry.py \
+      #     --workbook /workbook/MMG_v19_Test_Cases_Grouped_by_Feature_v3.0.xlsx
+      - ../../../document:/workbook:ro
       # v19 custom source, read-only, for the STATIC_ANALYSIS style checks.
       - ../../../mmg_19/mmg_19-custom:/src/mmg19:ro
       - ../../../mmg_15/custom-mmg:/src/mmg15:ro

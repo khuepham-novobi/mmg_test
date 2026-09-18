@@ -204,6 +204,22 @@ in the version adapters; UI interactions in `pages/`.
   the single expected tuning point on first contact with a customized DB.
 - **Multi-database server** → the login URL pins `?db=`, and XML-RPC always
   names the DB explicitly; make sure `ODOO15_DB` is exact.
+- **Dashboard shows NO workflows / 0 test cases, but the tests all register**
+  → `data/test_registry.json` is missing inside the container. In Docker
+  `/app/data` is the named volume `qa-data`, which SHADOWS the repo's
+  `data/` directory, and `data/` is gitignored — so the file arrives by
+  neither `git pull` nor the `.:/app` source mount. Deploying and hard
+  refreshing cannot fix it; the file has to be generated in the container:
+
+  ```bash
+  docker compose exec mmg-qa python scripts/sync_registry.py     --workbook /workbook/MMG_v19_Test_Cases_Grouped_by_Feature_v3.0.xlsx
+  curl -X POST http://127.0.0.1:7200/api/registry/reload
+  ```
+
+  `../../../document` is mounted read-only at `/workbook` for exactly this.
+  The server now prints a warning at startup when the file is absent — if
+  the dashboard is empty, check the container log first.
+
 - **Corporate proxy breaks `playwright install`** → set `HTTPS_PROXY` or
   download once on another network; browsers cache in `%USERPROFILE%\AppData\Local\ms-playwright`.
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -374,6 +375,20 @@ class Store:
         from the Excel workbook — the source of truth). Expected results are
         written exactly as they appear in the JSON; nothing here edits them."""
         if not registry_json.exists():
+            # Loud, because this failure is otherwise invisible. /app/data is
+            # a named volume that SHADOWS the repo's data/ directory, and
+            # data/ is gitignored — so the file arrives by neither git pull
+            # nor the source mount, and has to be generated in the container:
+            #   python scripts/sync_registry.py --workbook /workbook/<x>.xlsx
+            # Returning a silent 0 meant the dashboard showed no workflows at
+            # all while the 193 test scripts registered normally, and the
+            # deploy console reported success. That cost a deploy-and-refresh
+            # cycle to spot.
+            print("WARNING: test-case registry not found at %s - 0 test cases "
+                  "loaded, the dashboard will show no workflows. Regenerate "
+                  "it with: python scripts/sync_registry.py --workbook "
+                  "/workbook/<workbook>.xlsx" % registry_json,
+                  file=sys.stderr, flush=True)
             return 0
         data = json.loads(registry_json.read_text(encoding="utf-8"))
         with self._lock, self._conn() as con:
